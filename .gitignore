@@ -31,12 +31,18 @@ Histo/*
 datasets
 trianglesplatting++
 Runs/*
+output/
 triangulation/*
 *.bak
 wandb/*
 *.pt
 *.pth
+*.ply
 *.ipynb
+
+# Editors / IDE
+.vscode/
+.idea/
 
 
 # PyInstaller
