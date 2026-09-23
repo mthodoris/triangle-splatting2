@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV VIRTUAL_ENV=/app/.venv
@@ -30,8 +30,8 @@ RUN python3.11 -m venv /app/.venv
 
 RUN pip install --upgrade pip "setuptools<81" wheel packaging pybind11 ninja cmake
 
-RUN pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 \
-    --index-url https://download.pytorch.org/whl/cu126
+RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 RUN echo "$VIRTUAL_ENV/lib/python3.11/site-packages/torch/lib" > /etc/ld.so.conf.d/torch.conf && ldconfig
 
@@ -42,13 +42,15 @@ WORKDIR /app/triangle-splatting2
 
 RUN git submodule update --init --recursive --remote
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
 
 # --- Build diff-triangle2-rasterization CUDA extension ---
-RUN bash compile.sh
+RUN cd submodules/diff-triangle2-rasterization \
+    && rm -rf build dist diff_triangle_rasterization.egg-info \
+    && pip install --no-cache-dir --no-build-isolation .
 
 # --- Build simple-knn CUDA extension ---
-RUN cd submodules/simple-knn && pip install --no-cache-dir .
+RUN cd submodules/simple-knn && pip install --no-cache-dir --no-build-isolation .
 
 # --- Build Delaunay triangulation module (adapted from RadFoam) ---
 RUN cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$(pwd)/triangulation" \
