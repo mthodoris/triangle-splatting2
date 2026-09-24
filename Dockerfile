@@ -36,7 +36,7 @@ RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.
 RUN echo "$VIRTUAL_ENV/lib/python3.11/site-packages/torch/lib" > /etc/ld.so.conf.d/torch.conf && ldconfig
 
 ARG CACHEBUST=1
-RUN git clone --recursive -b main https://github.com/mthodoris/triangle-splatting2.git
+RUN git clone --recursive -b devel https://github.com/mthodoris/triangle-splatting2.git
 
 WORKDIR /app/triangle-splatting2
 
@@ -62,7 +62,7 @@ RUN python -c "import torch; print(torch.__version__, torch.version.cuda); print
 RUN python -c "import diff_triangle_rasterization; print('diff_triangle_rasterization ok')"
 RUN python -c "import simple_knn; print('simple_knn ok')"
 
-ENTRYPOINT ["bash", "-c", "git pull origin main && exec \"$@\"", "--"]
+ENTRYPOINT ["bash", "-c", "git pull origin devel && exec \"$@\"", "--"]
 WORKDIR /app/triangle-splatting2
 
 CMD ["/bin/bash"]
