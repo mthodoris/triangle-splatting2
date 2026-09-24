@@ -29,6 +29,7 @@ from utils.graphics_utils import BasicPointCloud
 import math
 from pytorch3d.ops import knn_points
 import triangulation
+import trimesh
 #import igl
 
 
@@ -274,7 +275,41 @@ class TriangleModel:
 
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
-        
+
+
+    def create_from_mesh(self, mesh_path : str, opacity : float, set_sigma : float):
+        """Initialize the triangle model from a predefined mesh instead of running
+        Delaunay triangulation on a point cloud. The mesh's own vertices and faces
+        are used directly, so its topology is preserved."""
+
+        mesh = trimesh.load(mesh_path, process=False, force="mesh")
+
+        _points = torch.tensor(np.asarray(mesh.vertices)).float().cuda()
+        faces = torch.tensor(np.asarray(mesh.faces)).to(torch.int64).cuda()
+
+        if mesh.visual is not None and getattr(mesh.visual, "vertex_colors", None) is not None:
+            vertex_colors = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.float32) / 255.0
+        else:
+            vertex_colors = np.full((_points.shape[0], 3), 0.5, dtype=np.float32)
+
+        fused_color = RGB2SH(torch.tensor(vertex_colors).float().cuda())
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0] = fused_color
+        features[:, 3:, 1:] = 0.0
+
+        self.vertices          = nn.Parameter(_points.requires_grad_(True))
+        self._triangle_indices = faces.to(torch.int32)
+        vert_weight = inverse_sigmoid(opacity * torch.ones((self.vertices.shape[0], 1), dtype=torch.float, device="cuda"))
+        self.vertex_weight = nn.Parameter(vert_weight.requires_grad_(True))
+
+        self._sigma = self.inverse_exponential_activation(set_sigma)
+
+        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+
+        self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
+        self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
+
 
     def training_setup(self, training_args, lr_mask, lr_features, weight_lr, lr_sigma, lr_triangles_init):
 
