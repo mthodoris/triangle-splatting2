@@ -284,8 +284,9 @@ def training(
         importance_score = render_pkg["max_blending"].detach()
         mask = importance_score > triangles.importance_score
         triangles.importance_score[mask] = importance_score[mask]
-    mask_importance  = (triangles.importance_score <= 0.5).squeeze() 
-    triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
+    if opt.start_pruning <= opt.iterations:
+        mask_importance  = (triangles.importance_score <= 0.5).squeeze()
+        triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
 
     scene.save(iteration)
     scene.save_mesh(iteration)
