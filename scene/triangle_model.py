@@ -24,7 +24,7 @@ from utils.general_utils import inverse_sigmoid, get_expon_lr_func
 from torch import nn
 import os
 from utils.system_utils import mkdir_p
-from utils.sh_utils import RGB2SH
+from utils.sh_utils import RGB2SH, SH2RGB
 from utils.graphics_utils import BasicPointCloud
 import math
 from pytorch3d.ops import knn_points
@@ -309,6 +309,25 @@ class TriangleModel:
 
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
+
+
+    def extract_mesh(self, path, iteration):
+        """Export the current triangle geometry as a colored mesh (vertices + faces),
+        using the trained per-vertex SH DC coefficients as vertex colors."""
+
+        mesh_path = os.path.join(path, "mesh", "iteration_{}".format(iteration))
+        mkdir_p(mesh_path)
+
+        vertices = self.vertices.detach().cpu().numpy()
+        faces = self._triangle_indices.detach().cpu().numpy().astype(np.int64)
+
+        vertex_colors = SH2RGB(self._features_dc.detach().squeeze(1)).clamp(0.0, 1.0)
+        vertex_colors = (vertex_colors.cpu().numpy() * 255.0).astype(np.uint8)
+
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=vertex_colors, process=False)
+        mesh.export(os.path.join(mesh_path, "mesh.ply"))
+
+        return os.path.join(mesh_path, "mesh.ply")
 
 
     def training_setup(self, training_args, lr_mask, lr_features, weight_lr, lr_sigma, lr_triangles_init):

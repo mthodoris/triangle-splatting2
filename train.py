@@ -184,6 +184,9 @@ def training(
             if iteration == opt.iterations:
                 progress_bar.close()
 
+            if iteration % 1000 == 0:
+                print(f"[ITER {iteration}] {iteration}/{opt.iterations}")
+
             # Log and save
             
             training_report(tb_writer, iteration, pixel_loss, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
@@ -284,7 +287,8 @@ def training(
     mask_importance  = (triangles.importance_score <= 0.5).squeeze() 
     triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
 
-    scene.save(iteration)          
+    scene.save(iteration)
+    scene.save_mesh(iteration)
     print("Training is done")
 
 def prepare_output_and_logger(args):    
