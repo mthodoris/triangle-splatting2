@@ -166,8 +166,10 @@ def training(
         else:
             loss_weight = 0
 
+        edge_loss = opt.lambda_edge * triangles.get_edge_loss() if opt.lambda_edge > 0 else 0
+
         # FINAL LOSS
-        loss = loss_image + loss_weight + normal_loss  # + depth_loss
+        loss = loss_image + loss_weight + normal_loss + edge_loss  # + depth_loss
 
         loss.backward()
         iter_end.record()

@@ -85,6 +85,7 @@ class OptimizationParams(ParamGroup):
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
         self.lambda_dssim = 0.2
+        self.lambda_edge = 0.0
 
         self.densification_interval = 500
 
