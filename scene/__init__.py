@@ -104,7 +104,7 @@ class Scene:
         return os.path.join(point_cloud_path, 'point_cloud_state_dict.pt')
 
     def save_mesh(self, iteration):
-        self.triangles.extract_mesh(self.model_path, iteration)
+        return self.triangles.extract_mesh(self.model_path, iteration)
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]
