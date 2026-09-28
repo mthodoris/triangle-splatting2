@@ -234,24 +234,25 @@ def training(
                 keep_mask   = ~delete_mask  # prune_triangles keeps True
 
                 # --- Apply pruning (keep=True) ---
-                if iteration > opt.start_pruning:
+                if iteration > opt.start_pruning and not opt.no_prune:
                     triangles.prune_triangles(keep_mask)
-             
-                # We prune vertices that are no longer used
-                device = triangles.vertices.device
-                used_vertex_mask = torch.zeros(triangles.vertices.shape[0], 
-                                            dtype=torch.bool, 
-                                            device=device)
-                if triangles._triangle_indices.numel() > 0:
-                    # Flatten indices and mark used vertices
-                    flat_indices = triangles._triangle_indices.flatten()
-                    used_vertex_mask[flat_indices] = True
-                
-                # Combine conditions: keep vertices if used OR weight above threshold
-                weight_mask = (triangles.get_vertex_weight.squeeze() >= prune_triangles)
-                vertex_mask = weight_mask | used_vertex_mask
 
-                triangles._prune_vertices(vertex_mask)
+                if not opt.no_prune:
+                    # We prune vertices that are no longer used
+                    device = triangles.vertices.device
+                    used_vertex_mask = torch.zeros(triangles.vertices.shape[0],
+                                                dtype=torch.bool,
+                                                device=device)
+                    if triangles._triangle_indices.numel() > 0:
+                        # Flatten indices and mark used vertices
+                        flat_indices = triangles._triangle_indices.flatten()
+                        used_vertex_mask[flat_indices] = True
+
+                    # Combine conditions: keep vertices if used OR weight above threshold
+                    weight_mask = (triangles.get_vertex_weight.squeeze() >= prune_triangles)
+                    vertex_mask = weight_mask | used_vertex_mask
+
+                    triangles._prune_vertices(vertex_mask)
 
 
                 triangle_vertex_weights = triangles.opacity_activation(
@@ -299,17 +300,18 @@ def training(
 
 
     # cleaning of triangles that we do not need
-    viewpoint_stack = scene.getTrainCameras().copy()
-    triangles.importance_score = torch.zeros((triangles._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
-    while viewpoint_stack:
-        viewpoint_cam = viewpoint_stack.pop(0)
-        render_pkg = render(viewpoint_cam, triangles, pipe, bg)
+    if not opt.no_prune:
+        viewpoint_stack = scene.getTrainCameras().copy()
+        triangles.importance_score = torch.zeros((triangles._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
+        while viewpoint_stack:
+            viewpoint_cam = viewpoint_stack.pop(0)
+            render_pkg = render(viewpoint_cam, triangles, pipe, bg)
 
-        importance_score = render_pkg["max_blending"].detach()
-        mask = importance_score > triangles.importance_score
-        triangles.importance_score[mask] = importance_score[mask]
-    mask_importance  = (triangles.importance_score <= 0.5).squeeze() 
-    triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
+            importance_score = render_pkg["max_blending"].detach()
+            mask = importance_score > triangles.importance_score
+            triangles.importance_score[mask] = importance_score[mask]
+        mask_importance  = (triangles.importance_score <= 0.5).squeeze()
+        triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
 
     scene.save(iteration)
     mesh_file = scene.save_mesh(iteration)
