@@ -61,7 +61,6 @@ class TriangleModel:
         self.vertices = torch.empty(0)
         self._triangle_indices = torch.empty(0)
         self.vertex_weight = torch.empty(0)
-        self._split_remove_mask = None
 
         self._sigma = 0
         self.active_sh_degree = 0
@@ -491,138 +490,73 @@ class TriangleModel:
 
 
 
-    def _triangle_edge_ids(self):
-        """For every triangle, the (shared) id of each of its 3 undirected edges.
-        Returns (unique_edges [E,2], tri_edge_ids [T,3], edge_to_tris: dict edge_id -> list[tri_id])."""
-
-        tris = self._triangle_indices.long()
-        T = tris.shape[0]
-        device = tris.device
-
-        edges = torch.stack([
-            torch.stack([tris[:, 0], tris[:, 1]], dim=1),
-            torch.stack([tris[:, 1], tris[:, 2]], dim=1),
-            torch.stack([tris[:, 2], tris[:, 0]], dim=1),
-        ], dim=1)  # [T, 3, 2]
-        edges_sorted, _ = torch.sort(edges, dim=2)
-        flat_edges = edges_sorted.reshape(-1, 2)  # [3T, 2], local edge order matches (ab, bc, ca)
-
-        unique_edges, flat_edge_ids = torch.unique(flat_edges, return_inverse=True, dim=0)
-        tri_edge_ids = flat_edge_ids.reshape(T, 3)
-
-        flat_tri_ids = torch.arange(T, device=device).unsqueeze(1).expand(T, 3).reshape(-1)
-        order = torch.argsort(flat_edge_ids)
-        sorted_eids = flat_edge_ids[order].tolist()
-        sorted_tids = flat_tri_ids[order].tolist()
-
-        edge_to_tris = {}
-        for e_id, t_id in zip(sorted_eids, sorted_tids):
-            edge_to_tris.setdefault(e_id, []).append(t_id)
-
-        return unique_edges, tri_edge_ids, edge_to_tris
-
-    def _plan_conforming_split(self, selected_indices):
-        """Decide, for every triangle touched by the requested split, whether it needs
-        a full 4-way ('red') split or a 2-way ('green') split, propagating the split to
-        neighbors so that no shared edge ever ends up with a midpoint on only one side
-        (the T-junction / crack that produced the mesh-soup artifacts)."""
-
-        selected_indices = torch.unique(selected_indices)
-        T = self._triangle_indices.shape[0]
-        device = self._triangle_indices.device
-
-        unique_edges, tri_edge_ids, edge_to_tris = self._triangle_edge_ids()
-        E = unique_edges.shape[0]
-
-        marked_edge = torch.zeros(E, dtype=torch.bool, device=device)
-        red = torch.zeros(T, dtype=torch.bool, device=device)
-
-        red[selected_indices] = True
-        seed_edges = tri_edge_ids[selected_indices].reshape(-1)
-        marked_edge[seed_edges] = True
-        frontier = torch.unique(seed_edges).tolist()
-
-        while frontier:
-            touched = set()
-            for e in frontier:
-                for t in edge_to_tris.get(e, []):
-                    if not red[t]:
-                        touched.add(t)
-            if not touched:
-                break
-
-            touched_idx = torch.tensor(sorted(touched), dtype=torch.long, device=device)
-            edge_counts = marked_edge[tri_edge_ids[touched_idx]].sum(dim=1)
-            promote = touched_idx[edge_counts >= 2]
-            if promote.numel() == 0:
-                break
-
-            red[promote] = True
-            promoted_edges = tri_edge_ids[promote].reshape(-1)
-            newly_marked = torch.unique(promoted_edges[~marked_edge[promoted_edges]])
-            marked_edge[promoted_edges] = True
-            frontier = newly_marked.tolist()
-
-        green = (~red) & marked_edge[tri_edge_ids].any(dim=1)
-
-        return unique_edges, tri_edge_ids, marked_edge, red, green
-
     def _update_params_fast(self, selected_indices, iteration):
-        tris = self._triangle_indices.long()
-        unique_edges, tri_edge_ids, marked_edge, red, green = self._plan_conforming_split(selected_indices)
-
-        marked_ids = marked_edge.nonzero(as_tuple=True)[0]
+        selected_indices = torch.unique(selected_indices)
+        selected_triangles_indices = self._triangle_indices[selected_indices]  # [S, 3]
+        S = selected_triangles_indices.shape[0]
+        
+        edges = torch.cat([
+            selected_triangles_indices[:, [0, 1]],
+            selected_triangles_indices[:, [0, 2]],
+            selected_triangles_indices[:, [1, 2]]
+        ], dim=0) 
+        edges_sorted, _ = torch.sort(edges, dim=1)
+        
+        unique_edges_tensor, unique_indices = torch.unique(
+            edges_sorted, return_inverse=True, dim=0
+        )  
+        M = unique_edges_tensor.shape[0]
+        
+        v0 = self.vertices[unique_edges_tensor[:, 0]]
+        v1 = self.vertices[unique_edges_tensor[:, 1]]
+        new_vertices = (v0 + v1) / 2.0
+        
         new_vertex_base = self.vertices.shape[0]
-        midpoint_id = torch.full((marked_edge.shape[0],), -1, dtype=torch.long, device=tris.device)
-        midpoint_id[marked_ids] = new_vertex_base + torch.arange(marked_ids.shape[0], device=tris.device)
+        
+        unique_edges_cpu = unique_edges_tensor.cpu()
+        edge_to_midpoint = {}
+        for i in range(M):
+            edge_tuple = (unique_edges_cpu[i, 0].item(), unique_edges_cpu[i, 1].item())
+            edge_to_midpoint[edge_tuple] = new_vertex_base + i
 
-        u, v = unique_edges[marked_ids, 0], unique_edges[marked_ids, 1]
-        new_vertices = (self.vertices[u] + self.vertices[v]) / 2.0
+        new_triangles_list = []
+        selected_triangles_cpu = selected_triangles_indices.cpu()
+        
+        for i in range(S):
+            tri = selected_triangles_cpu[i]
+            a, b, c = tri[0].item(), tri[1].item(), tri[2].item()
+            
+            ab = (min(a, b), max(a, b))
+            ac = (min(a, c), max(a, c))
+            bc = (min(b, c), max(b, c))
+            
+            m_ab = edge_to_midpoint[ab]
+            m_ac = edge_to_midpoint[ac]
+            m_bc = edge_to_midpoint[bc]
+
+            new_triangles_list.append([a, m_ab, m_ac])
+            new_triangles_list.append([b, m_ab, m_bc])
+            new_triangles_list.append([c, m_ac, m_bc])
+            new_triangles_list.append([m_ab, m_bc, m_ac])
+        
+        subdivided_triangles = torch.tensor(
+            new_triangles_list, 
+            dtype=torch.int32, 
+            device=self._triangle_indices.device
+        )
+
+        u, v = unique_edges_tensor[:, 0], unique_edges_tensor[:, 1]
         new_features_dc = (self._features_dc[u] + self._features_dc[v]) / 2.0
         new_features_rest = (self._features_rest[u] + self._features_rest[v]) / 2.0
-
+        
         opacity_u = self.opacity_activation(self.vertex_weight[u])
         opacity_v = self.opacity_activation(self.vertex_weight[v])
         avg_opacity = (opacity_u + opacity_v) / 2.0
         avg_opacity = torch.clamp(avg_opacity, self.opacity_floor + self.eps, 1 - self.eps)
         new_vertex_weight = self.inverse_opacity_activation(avg_opacity)
 
-        new_triangles_list = []
-
-        red_idx = red.nonzero(as_tuple=True)[0].tolist()
-        for t in red_idx:
-            a, b, c = tris[t].tolist()
-            e_ab, e_bc, e_ca = tri_edge_ids[t].tolist()
-            m_ab, m_bc, m_ca = midpoint_id[e_ab].item(), midpoint_id[e_bc].item(), midpoint_id[e_ca].item()
-
-            new_triangles_list.append([a, m_ab, m_ca])
-            new_triangles_list.append([b, m_bc, m_ab])
-            new_triangles_list.append([c, m_ca, m_bc])
-            new_triangles_list.append([m_ab, m_bc, m_ca])
-
-        green_idx = green.nonzero(as_tuple=True)[0].tolist()
-        for t in green_idx:
-            verts = tris[t].tolist()
-            eids = tri_edge_ids[t].tolist()
-            # exactly one edge of a green triangle is marked; find which local edge (0:ab,1:bc,2:ca)
-            j = next(k for k in range(3) if marked_edge[eids[k]])
-            m = midpoint_id[eids[j]].item()
-            v_j = verts[j]
-            v_j1 = verts[(j + 1) % 3]
-            v_j2 = verts[(j + 2) % 3]
-
-            new_triangles_list.append([v_j, m, v_j2])
-            new_triangles_list.append([m, v_j1, v_j2])
-
-        new_triangles = torch.tensor(
-            new_triangles_list,
-            dtype=torch.int32,
-            device=self._triangle_indices.device
-        ).reshape(-1, 3)
-
-        remove_mask = red | green
-        self._split_remove_mask = remove_mask
-
+        new_triangles = subdivided_triangles
+        
         return (
             new_vertices,
             new_vertex_weight,
@@ -663,22 +597,6 @@ class TriangleModel:
                 self._features_rest = tensor
 
 
-    def _remap_rest_edges(self, new_id):
-        """Keep the edge-length anchor (used by --lambda_edge) in sync with vertex
-        pruning/renumbering. Edges touching a removed vertex are dropped; the rest
-        stay anchored to their (possibly renumbered) original length. Without this,
-        _edge_index goes stale after any vertex prune and get_edge_loss() indexes
-        past the end of self.vertices, which is a CUDA device-side assert, not a
-        clean Python error."""
-
-        if self._edge_index is None or self._edge_index.numel() == 0:
-            return
-
-        remapped = new_id[self._edge_index.long()]
-        valid = (remapped >= 0).all(dim=1)
-        self._edge_index = remapped[valid].contiguous()
-        self._rest_edge_length = self._rest_edge_length[valid].contiguous()
-
     def _prune_vertices(self, vertex_mask: torch.Tensor):
         device = vertex_mask.device
         oldV = vertex_mask.numel()
@@ -687,8 +605,6 @@ class TriangleModel:
         new_id = torch.full((oldV,), -1, dtype=torch.long, device=device)
         kept = torch.nonzero(vertex_mask, as_tuple=True)[0]
         new_id[kept] = torch.arange(kept.numel(), device=device, dtype=torch.long)
-
-        self._remap_rest_edges(new_id)
 
         # Remap triangle indices and drop triangles with removed vertices
         if self._triangle_indices.numel() > 0:
@@ -727,8 +643,6 @@ class TriangleModel:
                     kept2 = torch.nonzero(mask_referenced, as_tuple=True)[0]
                     new_id2[kept2] = torch.arange(kept2.numel(), device=device, dtype=torch.long)
                     self._triangle_indices = new_id2[self._triangle_indices.long()].to(torch.int32).contiguous()
-
-                    self._remap_rest_edges(new_id2)
 
 
 
@@ -787,13 +701,10 @@ class TriangleModel:
 
         (new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles) = self._update_params_fast(add_idx, iteration)
 
-        remove_mask = self._split_remove_mask
-        self._split_remove_mask = None
-
         self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles)
 
-        mask = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool, device=self._triangle_indices.device)
-        mask[:remove_mask.shape[0]][remove_mask] = False
+        mask = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool)
+        mask[add_idx] = False
         self.prune_triangles(mask)
 
 
