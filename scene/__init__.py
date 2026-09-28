@@ -91,6 +91,9 @@ class Scene:
                                                            
                                                 ), segment=segment, ratio_threshold=ratio_threshold
                                     )
+        elif getattr(args, "mesh_path", ""):
+            print("Loading predefined mesh from {}".format(args.mesh_path))
+            self.triangles.create_from_mesh(args.mesh_path, init_opacity, set_sigma)
         else:
             self.triangles.create_from_pcd(scene_info.point_cloud, init_opacity, set_sigma)
 
