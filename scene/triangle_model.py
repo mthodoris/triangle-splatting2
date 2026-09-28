@@ -663,6 +663,22 @@ class TriangleModel:
                 self._features_rest = tensor
 
 
+    def _remap_rest_edges(self, new_id):
+        """Keep the edge-length anchor (used by --lambda_edge) in sync with vertex
+        pruning/renumbering. Edges touching a removed vertex are dropped; the rest
+        stay anchored to their (possibly renumbered) original length. Without this,
+        _edge_index goes stale after any vertex prune and get_edge_loss() indexes
+        past the end of self.vertices, which is a CUDA device-side assert, not a
+        clean Python error."""
+
+        if self._edge_index is None or self._edge_index.numel() == 0:
+            return
+
+        remapped = new_id[self._edge_index.long()]
+        valid = (remapped >= 0).all(dim=1)
+        self._edge_index = remapped[valid].contiguous()
+        self._rest_edge_length = self._rest_edge_length[valid].contiguous()
+
     def _prune_vertices(self, vertex_mask: torch.Tensor):
         device = vertex_mask.device
         oldV = vertex_mask.numel()
@@ -671,6 +687,8 @@ class TriangleModel:
         new_id = torch.full((oldV,), -1, dtype=torch.long, device=device)
         kept = torch.nonzero(vertex_mask, as_tuple=True)[0]
         new_id[kept] = torch.arange(kept.numel(), device=device, dtype=torch.long)
+
+        self._remap_rest_edges(new_id)
 
         # Remap triangle indices and drop triangles with removed vertices
         if self._triangle_indices.numel() > 0:
@@ -709,6 +727,8 @@ class TriangleModel:
                     kept2 = torch.nonzero(mask_referenced, as_tuple=True)[0]
                     new_id2[kept2] = torch.arange(kept2.numel(), device=device, dtype=torch.long)
                     self._triangle_indices = new_id2[self._triangle_indices.long()].to(torch.int32).contiguous()
+
+                    self._remap_rest_edges(new_id2)
 
 
 
