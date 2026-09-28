@@ -284,7 +284,9 @@ def training(
     mask_importance  = (triangles.importance_score <= 0.5).squeeze() 
     triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
 
-    scene.save(iteration)          
+    scene.save(iteration)
+    mesh_file = scene.save_mesh(iteration)
+    print("Saved mesh to {}".format(mesh_file))
     print("Training is done")
 
 def prepare_output_and_logger(args):    
