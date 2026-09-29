@@ -63,11 +63,16 @@ def training(
         triangles.restore(model_params, opt)
 
     if opt.fix_mesh:
-        print("--fix_mesh is set: freezing vertex positions and disabling pruning/densification. "
-              "Only appearance (color, opacity) will be optimized.")
-        triangles.vertices.requires_grad_(False)
         opt.no_prune = True
-        opt.densify_until_iter = 0
+        triangles.num_frozen_vertices = triangles.vertices.shape[0]
+        if opt.fix_mesh_allow_densify:
+            print("--fix_mesh with --fix_mesh_allow_densify: original mesh vertices are frozen and "
+                  "pruning is disabled, but densification may still add new vertices/triangles on top.")
+        else:
+            print("--fix_mesh is set: freezing vertex positions and disabling pruning/densification. "
+                  "Only appearance (color, opacity) will be optimized.")
+            triangles.vertices.requires_grad_(False)
+            opt.densify_until_iter = 0
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -272,6 +277,15 @@ def training(
                     triangle_vertex_weights = triangles.get_vertex_weight[triangles._triangle_indices]
 
 
+
+            if opt.fix_mesh and opt.fix_mesh_allow_densify:
+                # Densification appends new vertices at the end of the tensor and always
+                # re-enables requires_grad on the whole (old + new) parameter, so the only
+                # reliable way to keep the original mesh vertices frozen is to zero their
+                # gradient every step; new vertices added by densification stay trainable.
+                num_frozen = triangles.num_frozen_vertices
+                if num_frozen > 0 and triangles.vertices.grad is not None:
+                    triangles.vertices.grad[:num_frozen] = 0
 
             if iteration < opt.iterations:
                 triangles.optimizer.step()

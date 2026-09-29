@@ -140,6 +140,9 @@ class OptimizationParams(ParamGroup):
 
         # Keep the initial mesh topology and geometry fixed, only optimize appearance
         self.fix_mesh = False
+        # With --fix_mesh: still allow densification to add new vertices/triangles
+        # on top of the frozen mesh (original vertices never move, pruning stays off)
+        self.fix_mesh_allow_densify = False
 
         super().__init__(parser, "Optimization Parameters")
 
