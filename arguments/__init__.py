@@ -138,7 +138,8 @@ class OptimizationParams(ParamGroup):
 
         self.prune_size = 1400
 
-
+        # Keep the initial mesh topology and geometry fixed, only optimize appearance
+        self.fix_mesh = False
 
         super().__init__(parser, "Optimization Parameters")
 

@@ -58,10 +58,16 @@ def training(
     triangles.training_setup(opt, opt.feature_lr, opt.weight_lr, opt.lr_triangles_points_init)
     triangles.add_percentage = opt.add_percentage
 
-
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         triangles.restore(model_params, opt)
+
+    if opt.fix_mesh:
+        print("--fix_mesh is set: freezing vertex positions and disabling pruning/densification. "
+              "Only appearance (color, opacity) will be optimized.")
+        triangles.vertices.requires_grad_(False)
+        opt.no_prune = True
+        opt.densify_until_iter = 0
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
