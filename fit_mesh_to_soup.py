@@ -53,10 +53,13 @@ def load_soup(checkpoint_path, importance_threshold, min_opacity, device):
     filter train.py's own end-of-training cleanup uses — so junk/never-visible
     geometry doesn't get used as a fitting target."""
     sd = torch.load(checkpoint_path, map_location=device)
-    verts = sd["triangles_points"].to(device).to(torch.float32)
-    faces = sd["_triangle_indices"].to(device).to(torch.int64)
-    vertex_weight = sd["vertex_weight"].to(device).to(torch.float32)
-    features_dc = sd["features_dc"].to(device).to(torch.float32)
+    # Saved tensors are the training run's own nn.Parameters, so they still carry
+    # requires_grad=True after torch.load — detach so nothing here is accidentally
+    # tracked into (or blocks .numpy() calls from) this script's own optimization.
+    verts = sd["triangles_points"].detach().to(device).to(torch.float32)
+    faces = sd["_triangle_indices"].detach().to(device).to(torch.int64)
+    vertex_weight = sd["vertex_weight"].detach().to(device).to(torch.float32)
+    features_dc = sd["features_dc"].detach().to(device).to(torch.float32)
     importance_score = sd.get("importance_score", None)
 
     opacity = torch.sigmoid(vertex_weight).squeeze(-1)
@@ -81,6 +84,37 @@ def load_soup(checkpoint_path, importance_threshold, min_opacity, device):
     verts, faces = compact_mesh(verts, faces)
     colors = sh_dc_to_rgb(features_dc.squeeze(1))
     return verts, faces, colors
+
+
+def print_bbox(name, pts):
+    mn = pts.min(dim=0).values
+    mx = pts.max(dim=0).values
+    print(f"{name} bbox: min {mn.tolist()} max {mx.tolist()} "
+          f"extent {(mx - mn).tolist()} centroid {pts.mean(dim=0).tolist()}")
+    return mn, mx
+
+
+def check_alignment(soup_verts, target_verts):
+    """A large/increasing Chamfer loss usually means the two point sets aren't
+    actually in the same coordinate frame (different reconstruction pipelines,
+    different world scale/origin) rather than a fitting problem — check that
+    before trusting the loss curve."""
+    soup_mn, soup_mx = print_bbox("Soup", soup_verts)
+    mesh_mn, mesh_mx = print_bbox("Target mesh", target_verts)
+    soup_extent = soup_mx - soup_mn
+    overlap = (torch.min(soup_mx, mesh_mx) - torch.max(soup_mn, mesh_mn)).clamp(min=0.0)
+    overlap_frac = (overlap / soup_extent.clamp(min=1e-6)).min().item()
+    if overlap_frac < 0.3:
+        print(f"WARNING: bounding boxes overlap by only {overlap_frac:.1%} of the soup's extent on the "
+              f"tightest axis. --mesh_path and --soup_checkpoint may be in different coordinate frames "
+              f"or scales (e.g. the mesh came from a separate reconstruction pipeline that was never "
+              f"registered into the same world as the COLMAP/training scene). A high or non-decreasing "
+              f"Chamfer loss is expected in that case and no amount of --iterations will fix it — the "
+              f"meshes need to be aligned (rigid ICP / a known transform) before this script's "
+              f"deformation-only fit can do anything useful.")
+    else:
+        print(f"Bounding boxes overlap by {overlap_frac:.1%} of the soup's extent on the tightest axis — "
+              f"looks like the same scene/coordinate frame.")
 
 
 def load_target_mesh(mesh_path, device):
@@ -131,12 +165,19 @@ def main():
     print(f"Target mesh: {target_verts.shape[0]} vertices, {target_faces.shape[0]} faces "
           f"(topology fixed for the entire fit).")
 
+    check_alignment(soup_verts, target_verts)
+
     verts_init = target_verts.clone()
     verts_param = torch.nn.Parameter(target_verts.clone())
     optimizer = torch.optim.Adam([verts_param], lr=args.lr)
 
     with torch.no_grad():
         soup_points = sample_points_from_meshes(soup_mesh, args.n_samples)
+        init_mesh = Meshes(verts=[verts_init], faces=[target_faces])
+        init_points = sample_points_from_meshes(init_mesh, args.n_samples)
+        init_chamfer, _ = chamfer_distance(init_points, soup_points)
+        print(f"Initial Chamfer distance (before any deformation): {init_chamfer.item():.6f} "
+              f"— compare this to the final value to see whether the fit made progress at all.")
 
     for it in range(1, args.iterations + 1):
         optimizer.zero_grad()
@@ -162,17 +203,18 @@ def main():
                   f"chamfer {loss_chamfer.item():.6f}  laplacian {loss_laplacian.item():.6f}  "
                   f"normal {loss_normal.item():.6f}  anchor {loss_anchor.item():.6f}")
 
-    final_verts = verts_param.detach()
+    with torch.no_grad():
+        final_verts = verts_param.detach()
 
-    if args.transfer_color:
-        _, idx, _ = knn_points(final_verts.unsqueeze(0), soup_verts.unsqueeze(0), K=1)
-        vertex_colors = soup_colors[idx.squeeze(0).squeeze(-1)]
-    else:
-        vertex_colors = torch.full((final_verts.shape[0], 3), 0.5, device=device)
+        if args.transfer_color:
+            _, idx, _ = knn_points(final_verts.unsqueeze(0), soup_verts.unsqueeze(0), K=1)
+            vertex_colors = soup_colors[idx.squeeze(0).squeeze(-1)]
+        else:
+            vertex_colors = torch.full((final_verts.shape[0], 3), 0.5, device=device)
 
-    verts_np = final_verts.cpu().numpy()
-    faces_np = target_faces.cpu().numpy()
-    colors_u8 = (vertex_colors.clamp(0, 1).cpu().numpy() * 255.0).astype(np.uint8)
+        verts_np = final_verts.cpu().numpy()
+        faces_np = target_faces.cpu().numpy()
+        colors_u8 = (vertex_colors.clamp(0, 1).cpu().numpy() * 255.0).astype(np.uint8)
 
     out_mesh = trimesh.Trimesh(vertices=verts_np, faces=faces_np, vertex_colors=colors_u8, process=False)
     out_mesh.export(args.out)
