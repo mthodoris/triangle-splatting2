@@ -64,6 +64,10 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.mesh_path = ""
+        # SfM points farther than mesh_bg_margin * scene_extent outside the mesh's
+        # bounding box are treated as background/sky the mesh doesn't cover, and
+        # are Delaunay-triangulated and appended alongside it (see create_from_mesh).
+        self.mesh_bg_margin = 0.1
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

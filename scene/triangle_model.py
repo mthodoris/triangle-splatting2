@@ -72,6 +72,15 @@ class TriangleModel:
         self.importance_score = 0
         self.add_percentage = 1.0
 
+        # How many of the leading vertices/triangles came from a loaded mesh
+        # (create_from_mesh) rather than densification. num_frozen_* mirrors
+        # these but is only non-zero while --fix_mesh is protecting that
+        # prefix from pruning/densification/motion (set in train.py).
+        self.num_mesh_vertices = 0
+        self.num_mesh_triangles = 0
+        self.num_frozen_vertices = 0
+        self.num_frozen_triangles = 0
+
         self.scaling = 1
 
         self.setup_functions()
@@ -276,21 +285,101 @@ class TriangleModel:
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
 
+        # No mesh was loaded, so there's no protected prefix: everything here
+        # is eligible for pruning/densification even if --fix_mesh is (mis)used.
+        self.num_mesh_vertices = self.vertices.shape[0]
+        self.num_mesh_triangles = self._triangle_indices.shape[0]
 
-    def create_from_mesh(self, mesh_path : str, opacity : float, set_sigma : float):
+
+    def create_from_mesh(self, mesh_path : str, opacity : float, set_sigma : float,
+                          bg_pcd : BasicPointCloud = None, bg_margin : float = 0.0,
+                          scene_extent : float = 1.0):
         """Initialize the triangle model from a predefined mesh instead of running
         Delaunay triangulation on a point cloud. The mesh's own vertices and faces
-        are used directly, so its topology is preserved."""
+        are used directly, so its topology is preserved.
+
+        A precomputed mesh usually only covers the object it was reconstructed
+        for, leaving background/sky completely uncovered (no triangles to
+        render there at all). If bg_pcd is given, SfM points that fall outside
+        the mesh's bounding box (padded by bg_margin * scene_extent) are treated
+        as that missing background, Delaunay-tetrahedralized on their own (same
+        method as create_from_pcd), and appended after the mesh's own vertices
+        and triangles.
+
+        self.num_mesh_vertices / self.num_mesh_triangles record how many of the
+        leading entries belong to the original mesh, so callers (train.py, with
+        --fix_mesh) can freeze/protect exactly that prefix and only let pruning
+        and densification act on the appended background geometry — splitting a
+        subset of a connected mesh's triangles without also splitting their
+        unselected neighbors creates non-conforming T-junction cracks that
+        fragment it into "triangle soup".
+        """
 
         mesh = trimesh.load(mesh_path, process=False, force="mesh")
 
-        _points = torch.tensor(np.asarray(mesh.vertices)).float().cuda()
-        faces = torch.tensor(np.asarray(mesh.faces)).to(torch.int64).cuda()
+        mesh_points = torch.tensor(np.asarray(mesh.vertices)).float().cuda()
+        mesh_faces = torch.tensor(np.asarray(mesh.faces)).to(torch.int64).cuda()
 
         if mesh.visual is not None and getattr(mesh.visual, "vertex_colors", None) is not None:
-            vertex_colors = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.float32) / 255.0
+            mesh_vertex_colors = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.float32) / 255.0
         else:
-            vertex_colors = np.full((_points.shape[0], 3), 0.5, dtype=np.float32)
+            mesh_vertex_colors = np.full((mesh_points.shape[0], 3), 0.5, dtype=np.float32)
+
+        num_mesh_vertices = mesh_points.shape[0]
+        num_mesh_triangles = mesh_faces.shape[0]
+
+        _points = mesh_points
+        faces = mesh_faces
+        vertex_colors = mesh_vertex_colors
+
+        if bg_pcd is not None and len(np.asarray(bg_pcd.points)) > 0:
+            bg_points = np.asarray(bg_pcd.points)
+            bg_colors = np.asarray(bg_pcd.colors)
+
+            mesh_min = mesh_points.min(dim=0).values.cpu().numpy()
+            mesh_max = mesh_points.max(dim=0).values.cpu().numpy()
+            pad = bg_margin * scene_extent
+            outside = np.any((bg_points < mesh_min - pad) | (bg_points > mesh_max + pad), axis=1)
+
+            bg_points = bg_points[outside]
+            bg_colors = bg_colors[outside]
+
+            # De-dupe, same as create_from_pcd (duplicate points blow up the
+            # Delaunay triangulation / cause OOMs).
+            bg_points_rounded = np.round(bg_points, decimals=6)
+            _, unique_indices = np.unique(bg_points_rounded, axis=0, return_index=True)
+            unique_indices = np.sort(unique_indices)
+            bg_points = bg_points[unique_indices]
+            bg_colors = bg_colors[unique_indices]
+
+            if bg_points.shape[0] >= 4:
+                bg_points_t = torch.tensor(bg_points).float().cuda()
+
+                dt = triangulation.Triangulation(bg_points_t)
+                perm = dt.permutation().to(torch.long)
+                bg_points_t = bg_points_t[perm]
+                bg_colors = bg_colors[perm.cpu().numpy()]
+
+                tets = dt.tets().to(torch.int64)
+                bg_faces = torch.cat([
+                    tets[:, [0, 1, 2]],
+                    tets[:, [0, 1, 3]],
+                    tets[:, [0, 2, 3]],
+                    tets[:, [1, 2, 3]],
+                ], dim=0)
+                bg_faces, _ = torch.sort(bg_faces, dim=1)
+                bg_faces = torch.unique(bg_faces, dim=0)
+
+                print("Mesh init: adding {} background points ({} triangles) that fall "
+                      "outside the mesh bounding box (margin={:.3f}) to cover background/sky."
+                      .format(bg_points_t.shape[0], bg_faces.shape[0], pad))
+
+                _points = torch.cat([mesh_points, bg_points_t], dim=0)
+                faces = torch.cat([mesh_faces, bg_faces + num_mesh_vertices], dim=0)
+                vertex_colors = np.concatenate([mesh_vertex_colors, bg_colors.astype(np.float32)], axis=0)
+            else:
+                print("Mesh init: fewer than 4 SfM points fall outside the mesh bounding box; "
+                      "no background geometry was added.")
 
         fused_color = RGB2SH(torch.tensor(vertex_colors).float().cuda())
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -309,6 +398,9 @@ class TriangleModel:
 
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
+
+        self.num_mesh_vertices = num_mesh_vertices
+        self.num_mesh_triangles = num_mesh_triangles
 
 
     def extract_mesh(self, path, iteration):
@@ -641,6 +733,12 @@ class TriangleModel:
         if num_gs <= 0:
             return 0
 
+        protected = getattr(self, "num_frozen_triangles", 0)
+        if protected >= self._triangle_indices.shape[0]:
+            # Every triangle is a frozen (--fix_mesh) mesh triangle; there is no
+            # background geometry to densify, so there's nothing to select.
+            return 0
+
         # Find indexes based on proba
         triangle_transp = self.importance_score
         probs = triangle_transp.squeeze()
@@ -649,12 +747,22 @@ class TriangleModel:
         probs = torch.where(areas < self.size_probs_zero, torch.zeros_like(probs), probs)
         probs = torch.where(self.image_size < self.size_probs_zero_image_space, torch.zeros_like(probs), probs) # dont splitt if smaller than 10
 
+        areas_for_split = areas
+        if protected > 0:
+            # Never select frozen mesh triangles for subdivision: splitting a
+            # subset of a connected mesh without also splitting its unselected
+            # neighbors creates non-conforming T-junction cracks (see
+            # create_from_mesh's docstring).
+            probs[:protected] = 0
+            areas_for_split = areas.clone()
+            areas_for_split[:protected] = -1
+
         rand_idx = self._sample_alives(probs=probs, num=num_gs)
 
         # Split the largest triangles
         split_large = splitt_large_triangles
-        k = min(split_large, areas.numel())  
-        _, top_idx = torch.topk(areas, k, largest=True, sorted=False)
+        k = min(split_large, areas_for_split.numel())
+        _, top_idx = torch.topk(areas_for_split, k, largest=True, sorted=False)
 
         # 3) combine and deduplicate
         add_idx = torch.unique(torch.cat([rand_idx, top_idx.to(rand_idx.device)]), sorted=False)

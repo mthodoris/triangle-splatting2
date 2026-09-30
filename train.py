@@ -63,12 +63,16 @@ def training(
         triangles.restore(model_params, opt)
 
     if opt.fix_mesh:
-        opt.no_prune = True
-        triangles.num_frozen_vertices = triangles.vertices.shape[0]
+        triangles.num_frozen_vertices = triangles.num_mesh_vertices
+        triangles.num_frozen_triangles = triangles.num_mesh_triangles
         if opt.fix_mesh_allow_densify:
-            print("--fix_mesh with --fix_mesh_allow_densify: original mesh vertices are frozen and "
-                  "pruning is disabled, but densification may still add new vertices/triangles on top.")
+            print("--fix_mesh with --fix_mesh_allow_densify: the original mesh's {} vertices / {} "
+                  "triangles are frozen and protected from pruning; pruning and densification are "
+                  "otherwise left on their configured schedule and only ever touch the background "
+                  "geometry appended around the mesh (if any)."
+                  .format(triangles.num_frozen_vertices, triangles.num_frozen_triangles))
         else:
+            opt.no_prune = True
             print("--fix_mesh is set: freezing vertex positions and disabling pruning/densification. "
                   "Only appearance (color, opacity) will be optimized.")
             triangles.vertices.requires_grad_(False)
@@ -215,6 +219,11 @@ def training(
                 mask_size        = (triangles.image_size > prune_size).squeeze()                 # delete if too big
 
                 delete_mask = mask_opacity | mask_importance | mask_size
+                num_frozen_triangles = getattr(triangles, "num_frozen_triangles", 0)
+                if num_frozen_triangles > 0:
+                    # Never delete the frozen (--fix_mesh) mesh prefix, regardless of
+                    # its opacity/importance/size — it's protected, not just unlucky.
+                    delete_mask[:num_frozen_triangles] = False
                 keep_mask   = ~delete_mask  # prune_triangles keeps True
 
                 # --- Apply pruning (keep=True) ---

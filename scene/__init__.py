@@ -93,7 +93,10 @@ class Scene:
                                     )
         elif getattr(args, "mesh_path", ""):
             print("Loading predefined mesh from {}".format(args.mesh_path))
-            self.triangles.create_from_mesh(args.mesh_path, init_opacity, set_sigma)
+            self.triangles.create_from_mesh(args.mesh_path, init_opacity, set_sigma,
+                                             bg_pcd=scene_info.point_cloud,
+                                             bg_margin=getattr(args, "mesh_bg_margin", 0.0),
+                                             scene_extent=self.cameras_extent)
         else:
             self.triangles.create_from_pcd(scene_info.point_cloud, init_opacity, set_sigma)
 
