@@ -313,7 +313,15 @@ def training(
             mask = importance_score > triangles.importance_score
             triangles.importance_score[mask] = importance_score[mask]
         mask_importance  = (triangles.importance_score <= 0.5).squeeze()
-        triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
+        delete_mask = mask_importance
+        num_frozen_triangles = getattr(triangles, "num_frozen_triangles", 0)
+        if num_frozen_triangles > 0:
+            # Same protection as the periodic pruning above: never drop frozen
+            # (--fix_mesh) mesh triangles here either, even if they were never
+            # the most-visible contributor to any training view (e.g. occluded
+            # interior faces of a closed mesh).
+            delete_mask[:num_frozen_triangles] = False
+        triangles.prune_triangles(~delete_mask) # delete all the remaining triangles that do not have an influence
 
     scene.save(iteration)
     mesh_file = scene.save_mesh(iteration)
