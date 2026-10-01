@@ -30,6 +30,7 @@ import trimesh
 from pytorch3d.loss import chamfer_distance, mesh_laplacian_smoothing, mesh_normal_consistency
 from pytorch3d.ops import knn_points, sample_points_from_meshes
 from pytorch3d.structures import Meshes
+from pytorch3d.transforms import rotation_6d_to_matrix
 
 SH_C0 = 0.28209479177387814
 
@@ -95,26 +96,74 @@ def print_bbox(name, pts):
 
 
 def check_alignment(soup_verts, target_verts):
-    """A large/increasing Chamfer loss usually means the two point sets aren't
-    actually in the same coordinate frame (different reconstruction pipelines,
-    different world scale/origin) rather than a fitting problem — check that
-    before trusting the loss curve."""
+    """A large/increasing Chamfer loss can mean the two point sets aren't in the
+    same coordinate frame at all (different reconstruction pipelines, different
+    world scale/origin) rather than a fitting problem — check bbox overlap AND
+    the per-axis extent ratio (overlap alone looks fine when a correctly-placed
+    but wrongly-scaled mesh sits entirely inside a much bigger soup volume)."""
     soup_mn, soup_mx = print_bbox("Soup", soup_verts)
     mesh_mn, mesh_mx = print_bbox("Target mesh", target_verts)
     soup_extent = soup_mx - soup_mn
+    mesh_extent = mesh_mx - mesh_mn
     overlap = (torch.min(soup_mx, mesh_mx) - torch.max(soup_mn, mesh_mn)).clamp(min=0.0)
     overlap_frac = (overlap / soup_extent.clamp(min=1e-6)).min().item()
+    extent_ratio = (soup_extent / mesh_extent.clamp(min=1e-6))
+    print(f"Soup/mesh extent ratio per axis: {extent_ratio.tolist()} "
+          f"(1.0 would mean matching scale).")
     if overlap_frac < 0.3:
         print(f"WARNING: bounding boxes overlap by only {overlap_frac:.1%} of the soup's extent on the "
-              f"tightest axis. --mesh_path and --soup_checkpoint may be in different coordinate frames "
-              f"or scales (e.g. the mesh came from a separate reconstruction pipeline that was never "
-              f"registered into the same world as the COLMAP/training scene). A high or non-decreasing "
-              f"Chamfer loss is expected in that case and no amount of --iterations will fix it — the "
-              f"meshes need to be aligned (rigid ICP / a known transform) before this script's "
-              f"deformation-only fit can do anything useful.")
-    else:
-        print(f"Bounding boxes overlap by {overlap_frac:.1%} of the soup's extent on the tightest axis — "
-              f"looks like the same scene/coordinate frame.")
+              f"tightest axis — likely different coordinate frames/origins, not just scale.")
+    if extent_ratio.max().item() > 1.5 or extent_ratio.min().item() < 1 / 1.5:
+        print("WARNING: mesh and soup are at noticeably different scales (see extent ratio above). "
+              "--align_iterations (on by default) estimates a global scale/rotation/translation before "
+              "the per-vertex fit to correct this; a pure non-rigid Chamfer fit alone would need many "
+              "more iterations to achieve the same correction and may distort the mesh doing it.")
+    if overlap_frac >= 0.3 and extent_ratio.max().item() <= 1.5 and extent_ratio.min().item() >= 1 / 1.5:
+        print("Bounding boxes and scale look consistent with the same scene/coordinate frame.")
+
+
+def estimate_similarity_transform(soup_points, target_verts, device,
+                                   iterations=500, lr=0.05, n_samples=50_000, log_every=50):
+    """Estimate a global scale + rotation + translation that brings target_verts
+    onto soup_points, via gradient descent on a symmetric Chamfer distance (no
+    point correspondences needed). This is a 7-parameter problem, orders of
+    magnitude cheaper and more robust than asking the per-vertex non-rigid fit
+    to also absorb a bulk scale/pose discrepancy through smoothness-constrained
+    vertex nudges."""
+    n = target_verts.shape[0]
+    sample_idx = torch.randperm(n, device=device)[:min(n_samples, n)]
+    mesh_sample = target_verts[sample_idx]
+
+    soup_diag = (soup_points.max(dim=1).values - soup_points.min(dim=1).values).norm()
+    mesh_diag = (mesh_sample.max(dim=0).values - mesh_sample.min(dim=0).values).norm()
+    init_scale = (soup_diag / mesh_diag.clamp(min=1e-6)).item()
+
+    log_scale = torch.nn.Parameter(torch.log(torch.tensor(init_scale, device=device)))
+    rotation6d = torch.nn.Parameter(torch.tensor([1., 0., 0., 0., 1., 0.], device=device))
+    init_translation = soup_points.mean(dim=1).squeeze(0) - init_scale * mesh_sample.mean(dim=0)
+    translation = torch.nn.Parameter(init_translation.clone())
+
+    optimizer = torch.optim.Adam([log_scale, rotation6d, translation], lr=lr)
+
+    print(f"Pre-alignment: initial scale estimate {init_scale:.4f} "
+          f"(from bbox-diagonal ratio), refining scale + rotation + translation...")
+
+    for it in range(1, iterations + 1):
+        optimizer.zero_grad()
+        scale = torch.exp(log_scale)
+        R = rotation_6d_to_matrix(rotation6d.unsqueeze(0))[0]
+        transformed = (mesh_sample * scale) @ R.T + translation
+        loss, _ = chamfer_distance(transformed.unsqueeze(0), soup_points)
+        loss.backward()
+        optimizer.step()
+        if it % log_every == 0 or it == 1 or it == iterations:
+            print(f"[align {it:4d}/{iterations}] chamfer {loss.item():.6f}  scale {scale.item():.4f}")
+
+    with torch.no_grad():
+        scale = torch.exp(log_scale).detach()
+        R = rotation_6d_to_matrix(rotation6d.unsqueeze(0))[0].detach()
+        t = translation.detach()
+    return scale, R, t
 
 
 def load_target_mesh(mesh_path, device):
@@ -151,6 +200,17 @@ def main():
     p.add_argument("--transfer_color", action="store_true", default=True)
     p.add_argument("--no_transfer_color", dest="transfer_color", action="store_false")
     p.add_argument("--log_every", type=int, default=100)
+    p.add_argument("--align", action="store_true", default=True,
+                   help="Estimate a global scale/rotation/translation before the per-vertex fit, to "
+                        "correct a bulk scale/pose mismatch (common when the mesh came from a separate "
+                        "reconstruction pipeline) cheaply instead of making the non-rigid fit absorb it.")
+    p.add_argument("--no_align", dest="align", action="store_false")
+    p.add_argument("--align_iterations", type=int, default=500)
+    p.add_argument("--align_lr", type=float, default=0.05)
+    p.add_argument("--align_n_samples", type=int, default=50_000,
+                   help="Mesh vertices subsampled per alignment iteration (cheaper than full surface "
+                        "resampling — fine for a 7-parameter global fit).")
+    p.add_argument("--align_log_every", type=int, default=50)
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
@@ -167,17 +227,29 @@ def main():
 
     check_alignment(soup_verts, target_verts)
 
+    with torch.no_grad():
+        soup_points = sample_points_from_meshes(soup_mesh, args.n_samples)
+
+    if args.align:
+        scale, R, t = estimate_similarity_transform(
+            soup_points, target_verts, device,
+            iterations=args.align_iterations, lr=args.align_lr,
+            n_samples=args.align_n_samples, log_every=args.align_log_every)
+        with torch.no_grad():
+            target_verts = (target_verts * scale) @ R.T + t
+        print(f"Pre-alignment done: scale {scale.item():.4f}, translation {t.tolist()}")
+
     verts_init = target_verts.clone()
     verts_param = torch.nn.Parameter(target_verts.clone())
     optimizer = torch.optim.Adam([verts_param], lr=args.lr)
 
     with torch.no_grad():
-        soup_points = sample_points_from_meshes(soup_mesh, args.n_samples)
         init_mesh = Meshes(verts=[verts_init], faces=[target_faces])
         init_points = sample_points_from_meshes(init_mesh, args.n_samples)
         init_chamfer, _ = chamfer_distance(init_points, soup_points)
-        print(f"Initial Chamfer distance (before any deformation): {init_chamfer.item():.6f} "
-              f"— compare this to the final value to see whether the fit made progress at all.")
+        print(f"Initial Chamfer distance (before the per-vertex fit, "
+              f"{'after' if args.align else 'without'} pre-alignment): {init_chamfer.item():.6f} "
+              f"— compare this to the final value to see whether the fit made progress.")
 
     for it in range(1, args.iterations + 1):
         optimizer.zero_grad()
@@ -220,6 +292,8 @@ def main():
     out_mesh.export(args.out)
     displacement = np.linalg.norm(verts_np - verts_init.cpu().numpy(), axis=1)
     print(f"Saved fitted mesh to {args.out}")
+    print(f"(Displacement below is the non-rigid fit's own contribution, measured "
+          f"{'after' if args.align else 'without'} the global pre-alignment step.)")
     print(f"Vertices: {verts_np.shape[0]}, Faces: {faces_np.shape[0]} (topology identical to --mesh_path)")
     print(f"Displacement from original mesh: mean {displacement.mean():.5f}, max {displacement.max():.5f}")
 
