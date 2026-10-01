@@ -10,10 +10,21 @@ decouple the two goals entirely.
    no --fix_mesh) to get the best possible photometric reconstruction — the
    "soup" checkpoint this script reads.
 2. Run this script to non-rigidly deform your own clean mesh's vertices so its
-   surface matches the geometry implied by that soup, via a Chamfer distance
-   data term plus Laplacian/normal regularizers that keep the mesh well-formed.
-   The clean mesh's faces (its topology) are never touched, so it can never be
-   broken into soup — only its vertex positions move.
+   surface matches the geometry implied by that soup, via a one-directional
+   (mesh -> soup) nearest-neighbor distance plus Laplacian/normal regularizers
+   that keep the mesh well-formed. The clean mesh's faces (its topology) are
+   never touched, so it can never be broken into soup — only its vertex
+   positions move.
+
+   The data term is intentionally one-directional, not a symmetric Chamfer
+   distance: your mesh usually covers only the foreground object, while the
+   soup checkpoint is the whole trained scene (background included). A
+   symmetric loss also penalizes soup points with no nearby mesh point, which
+   drives the optimizer to stretch the object mesh's vertices outward trying
+   to "cover" distant background geometry it was never meant to represent —
+   producing spiky, exploded-looking results. One-directional only asks "is
+   every mesh point near some real soup geometry", so background soup points
+   are simply irrelevant rather than a pull on the mesh.
 
 Usage:
     python fit_mesh_to_soup.py \\
@@ -27,12 +38,23 @@ import sys
 import numpy as np
 import torch
 import trimesh
-from pytorch3d.loss import chamfer_distance, mesh_laplacian_smoothing, mesh_normal_consistency
+from pytorch3d.loss import mesh_laplacian_smoothing, mesh_normal_consistency
 from pytorch3d.ops import knn_points, sample_points_from_meshes
 from pytorch3d.structures import Meshes
 from pytorch3d.transforms import rotation_6d_to_matrix
 
 SH_C0 = 0.28209479177387814
+
+
+def mesh_to_soup_distance(mesh_points, soup_points):
+    """One-directional nearest-neighbor distance: every mesh_points sample must
+    be close to some soup_points sample, but soup_points with no nearby mesh
+    point are never penalized (see module docstring for why this matters more
+    here than it would for a symmetric Chamfer distance). Both inputs are
+    [1, N, 3]; same squared-L2/mean convention as pytorch3d's chamfer_distance
+    so existing --w_chamfer weights/scales stay meaningful."""
+    dists, _, _ = knn_points(mesh_points, soup_points, K=1)
+    return dists.mean()
 
 
 def sh_dc_to_rgb(features_dc):
@@ -153,11 +175,11 @@ def estimate_similarity_transform(soup_points, target_verts, device,
         scale = torch.exp(log_scale)
         R = rotation_6d_to_matrix(rotation6d.unsqueeze(0))[0]
         transformed = (mesh_sample * scale) @ R.T + translation
-        loss, _ = chamfer_distance(transformed.unsqueeze(0), soup_points)
+        loss = mesh_to_soup_distance(transformed.unsqueeze(0), soup_points)
         loss.backward()
         optimizer.step()
         if it % log_every == 0 or it == 1 or it == iterations:
-            print(f"[align {it:4d}/{iterations}] chamfer {loss.item():.6f}  scale {scale.item():.4f}")
+            print(f"[align {it:4d}/{iterations}] dist {loss.item():.6f}  scale {scale.item():.4f}")
 
     with torch.no_grad():
         scale = torch.exp(log_scale).detach()
@@ -246,9 +268,9 @@ def main():
     with torch.no_grad():
         init_mesh = Meshes(verts=[verts_init], faces=[target_faces])
         init_points = sample_points_from_meshes(init_mesh, args.n_samples)
-        init_chamfer, _ = chamfer_distance(init_points, soup_points)
-        print(f"Initial Chamfer distance (before the per-vertex fit, "
-              f"{'after' if args.align else 'without'} pre-alignment): {init_chamfer.item():.6f} "
+        init_dist = mesh_to_soup_distance(init_points, soup_points)
+        print(f"Initial mesh->soup distance (before the per-vertex fit, "
+              f"{'after' if args.align else 'without'} pre-alignment): {init_dist.item():.6f} "
               f"— compare this to the final value to see whether the fit made progress.")
 
     for it in range(1, args.iterations + 1):
@@ -256,7 +278,7 @@ def main():
         current_mesh = Meshes(verts=[verts_param], faces=[target_faces])
 
         pred_points = sample_points_from_meshes(current_mesh, args.n_samples)
-        loss_chamfer, _ = chamfer_distance(pred_points, soup_points)
+        loss_chamfer = mesh_to_soup_distance(pred_points, soup_points)
 
         loss_laplacian = mesh_laplacian_smoothing(current_mesh, method="uniform")
         loss_normal = mesh_normal_consistency(current_mesh)
