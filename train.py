@@ -38,6 +38,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 import lpips
 import torch.nn.functional as F
+from utils.train_logger import TrainLogger
 
 
 def training(
@@ -47,6 +48,7 @@ def training(
         testing_iterations,
         checkpoint, 
         debug_from,
+        logger,
         ):
     
     first_iter = 0
@@ -55,6 +57,10 @@ def training(
     # Load parameters, triangles and scene
     triangles = TriangleModel(dataset.sh_degree)
     scene = Scene(dataset, triangles, opt.set_weight, opt.set_sigma)
+    init_num_vertices = triangles.vertices.shape[0]
+    init_num_triangles = triangles._triangle_indices.shape[0]
+    print("Initial model: {} vertices, {} triangles ({})".format(
+        init_num_vertices, init_num_triangles, dataset.mesh_path if dataset.mesh_path else "point cloud"))
     triangles.training_setup(opt, opt.feature_lr, opt.weight_lr, opt.lr_triangles_points_init)
     triangles.add_percentage = opt.add_percentage
 
@@ -72,7 +78,8 @@ def training(
     viewpoint_stack = scene.getTrainCameras().copy()
 
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    # tqdm goes straight to the terminal so its carriage-return updates do not flood logs/stdout.txt
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", file=sys.__stderr__)
     first_iter += 1
 
     initial_sigma = opt.set_sigma
@@ -186,7 +193,8 @@ def training(
 
             # Log and save
             
-            training_report(tb_writer, iteration, pixel_loss, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            logger.log_metrics(iteration, loss, ema_loss_for_log, pixel_loss, normal_loss, loss_weight, current_sigma, triangles)
+            training_report(tb_writer, logger, iteration, pixel_loss, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             
             # Handle pruning operations
             if iteration % 500 == 0:
@@ -287,15 +295,31 @@ def training(
     scene.save(iteration)
     mesh_file = scene.save_mesh(iteration)
     print("Saved mesh to {}".format(mesh_file))
+    logger.write_summary({
+        "status": "finished",
+        "iterations": iteration,
+        "init_source": dataset.mesh_path if dataset.mesh_path else "point cloud",
+        "init_num_vertices": init_num_vertices,
+        "init_num_triangles": init_num_triangles,
+        "final_num_vertices": triangles.vertices.shape[0],
+        "final_num_triangles": triangles._triangle_indices.shape[0],
+        "final_ema_loss": "{:.6f}".format(ema_loss_for_log),
+        "peak_gpu_mem_gb": "{:.2f}".format(torch.cuda.max_memory_allocated() / 1024 ** 3),
+        "model_path": scene.model_path,
+        "mesh_file": mesh_file,
+    })
     print("Training is done")
 
-def prepare_output_and_logger(args):    
+def resolve_model_path(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
+
+def prepare_output_and_logger(args):    
+    resolve_model_path(args)
         
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
@@ -311,7 +335,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, pixel_loss, loss, loss_fn, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, logger, iteration, pixel_loss, loss, loss_fn, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/pixel_loss', pixel_loss.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -356,6 +380,7 @@ def training_report(tb_writer, iteration, pixel_loss, loss, loss_fn, elapsed, te
                 total_time /= len(config['cameras'])
                 fps = 1000.0 / total_time
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {}".format(iteration, config['name'], pixel_loss_test, psnr_test, ssim_test, lpips_test))
+                logger.log_eval(iteration, config['name'], pixel_loss_test, psnr_test, ssim_test, lpips_test, fps)
 
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', pixel_loss_test, iteration)
@@ -385,6 +410,11 @@ if __name__ == "__main__":
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
+    # Resolve the output folder up front so everything from here on is logged to <model_path>/logs/
+    resolve_model_path(args)
+    logger = TrainLogger(args.model_path)
+    logger.write_config(args)
+
     print("Optimizing " + args.model_path)
 
     lpips_fn = lpips.LPIPS(net='vgg').to(device="cuda")
@@ -401,13 +431,18 @@ if __name__ == "__main__":
 
     # Configure and run training
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lps,
-             ops,
-             pps,
-             args.test_iterations,
-             args.start_checkpoint,
-             args.debug_from,
-             )
+    try:
+        training(lps,
+                 ops,
+                 pps,
+                 args.test_iterations,
+                 args.start_checkpoint,
+                 args.debug_from,
+                 logger,
+                 )
+    except BaseException as e:
+        logger.write_summary({"status": "failed", "error": repr(e)})
+        raise
     
     # All done
     print("\nTraining complete.")
