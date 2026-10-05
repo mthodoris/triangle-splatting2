@@ -177,3 +177,95 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     else:
         return ssim_map.mean(1).mean(1).mean(1)
 
+
+
+def mesh_topology(faces):
+    """
+    Edge connectivity of an indexed triangle mesh.
+
+    Returns:
+        edges: [E,2] unique undirected edges (sorted vertex ids)
+        manifold: [M] indices into edges of the edges shared by exactly two faces
+        f0, f1: [M] the two faces adjacent to each manifold edge
+        boundary_vertices: [B] vertex ids on boundary edges (edges with a single face)
+    """
+    f = faces.long()
+    T = f.shape[0]
+    e = torch.sort(torch.cat([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]], 0), dim=1).values
+    fid = torch.arange(T, device=f.device).repeat(3)
+    edges, inv, counts = torch.unique(e, dim=0, return_inverse=True, return_counts=True)
+    order = torch.argsort(inv, stable=True)
+    start = torch.cumsum(counts, 0) - counts
+    manifold = torch.nonzero(counts == 2, as_tuple=True)[0]
+    f0 = fid[order[start[manifold]]]
+    f1 = fid[order[start[manifold] + 1]]
+    boundary_vertices = torch.unique(edges[counts == 1])
+    return edges, manifold, f0, f1, boundary_vertices
+
+
+def face_normals(vertices, faces):
+    v = vertices[faces.long()]
+    return F.normalize(torch.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0], dim=1), dim=1)
+
+
+def crease_weights(vertices, faces, topology, sigma):
+    """
+    Per-edge weights in [0,1]: ~1 on flat regions, ~0 across sharp creases (detached).
+    Boundary and non-manifold edges get weight 1.
+    """
+    edges, manifold, f0, f1, _ = topology
+    with torch.no_grad():
+        n = face_normals(vertices, faces)
+        cos = (n[f0] * n[f1]).sum(1).abs()  # abs: face winding is not guaranteed consistent
+        w = torch.ones(edges.shape[0], device=vertices.device)
+        w[manifold] = torch.exp(-(1.0 - cos) / sigma)
+    return w
+
+
+def laplacian_loss(vertices, edges, weights=None, fixed_vertices=None):
+    """
+    Uniform (optionally edge-weighted) Laplacian smoothing, normalized by the mean edge length
+    so that it does not depend on the scene scale. fixed_vertices (e.g. boundary vertices) are
+    left out, otherwise the uniform Laplacian pulls open boundaries inwards and shrinks the mesh.
+    Each vertex is also scaled by its smallest incident edge weight: a vertex on a crease has
+    weight-1 neighbours on both sides, whose average lies off the crease, so edge weights alone
+    would still round it off.
+    """
+    i, j = edges[:, 0], edges[:, 1]
+    w = torch.ones(i.shape[0], device=vertices.device) if weights is None else weights
+    nb = torch.zeros_like(vertices).index_add_(0, i, w[:, None] * vertices[j]).index_add_(0, j, w[:, None] * vertices[i])
+    deg = torch.zeros(vertices.shape[0], device=vertices.device).index_add_(0, i, w).index_add_(0, j, w)
+    used = deg > 1e-8
+    if fixed_vertices is not None:
+        used[fixed_vertices] = False
+    if not used.any():
+        return torch.zeros((), device=vertices.device)
+    vertex_w = torch.ones(vertices.shape[0], device=vertices.device)
+    vertex_w = vertex_w.scatter_reduce(0, i, w, "amin").scatter_reduce(0, j, w, "amin")
+    lap = vertices[used] - nb[used] / deg[used, None]
+    scale = (vertices[i] - vertices[j]).norm(dim=1).mean().detach() + 1e-12
+    return (vertex_w[used] * lap.norm(dim=1) / scale).mean()
+
+
+def edge_aware_normal_consistency(vertices, faces, topology, sigma):
+    """
+    1 - cos between adjacent face normals, down-weighted across sharp creases so they stay sharp.
+    """
+    _, _, f0, f1, _ = topology
+    if f0.numel() == 0:
+        return torch.zeros((), device=vertices.device)
+    n = face_normals(vertices, faces)
+    cos = (n[f0] * n[f1]).sum(1).abs()
+    w = torch.exp(-(1.0 - cos.detach()) / sigma)
+    return (w * (1.0 - cos)).mean()
+
+
+def edge_aware_smoothness(normal, image, alpha):
+    """
+    Image-space smoothness of a [3,H,W] normal map, relaxed where the [3,H,W] image has edges.
+    """
+    dn_x = (normal[:, :, 1:] - normal[:, :, :-1]).abs().sum(0)
+    dn_y = (normal[:, 1:, :] - normal[:, :-1, :]).abs().sum(0)
+    w_x = torch.exp(-alpha * (image[:, :, 1:] - image[:, :, :-1]).abs().mean(0))
+    w_y = torch.exp(-alpha * (image[:, 1:, :] - image[:, :-1, :]).abs().mean(0))
+    return (dn_x * w_x).mean() + (dn_y * w_y).mean()

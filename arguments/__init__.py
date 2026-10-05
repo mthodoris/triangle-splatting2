@@ -105,6 +105,13 @@ class OptimizationParams(ParamGroup):
         self.iteration_mesh = 5000
         self.lambda_normals = 0.05
 
+        # Mesh regularization (all off by default, active after iteration_mesh)
+        self.lambda_laplacian = 0.0
+        self.lambda_normal_consistency = 0.0
+        self.lambda_edge_smooth = 0.0
+        self.crease_sigma = 0.1 # dihedral falloff: smaller keeps more creases sharp (90 deg -> weight ~0.05)
+        self.edge_alpha = 10.0 # image-gradient falloff for edge-aware smoothness
+
         self.add_percentage = 1.23
 
         # PARAMETER FIRST STAGE

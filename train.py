@@ -21,7 +21,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, laplacian_loss, edge_aware_normal_consistency, edge_aware_smoothness
 from triangle_renderer import render
 import sys
 from scene import Scene, TriangleModel
@@ -101,6 +101,9 @@ def training(
     triangles.size_probs_zero = opt.size_probs_zero
     triangles.size_probs_zero_image_space = opt.size_probs_zero_image_space
 
+    use_mesh_reg = opt.lambda_laplacian > 0 or opt.lambda_normal_consistency > 0
+    topology = None # edge connectivity, rebuilt after every prune/densify step
+
     for iteration in range(first_iter, opt.iterations + 1):
 
 
@@ -173,8 +176,23 @@ def training(
         else:
             loss_weight = 0
 
+        # mesh regularization: Laplacian smoothing and edge-aware normal smoothness
+        reg_loss = 0
+        if iteration > opt.iteration_mesh:
+            if use_mesh_reg and triangles._triangle_indices.numel() > 0:
+                if topology is None:
+                    topology = mesh_topology(triangles._triangle_indices)
+                if opt.lambda_laplacian > 0:
+                    edge_w = crease_weights(triangles.vertices, triangles._triangle_indices, topology, opt.crease_sigma)
+                    reg_loss = reg_loss + opt.lambda_laplacian * laplacian_loss(triangles.vertices, topology[0], edge_w, topology[4])
+                if opt.lambda_normal_consistency > 0:
+                    reg_loss = reg_loss + opt.lambda_normal_consistency * edge_aware_normal_consistency(
+                        triangles.vertices, triangles._triangle_indices, topology, opt.crease_sigma)
+            if opt.lambda_edge_smooth > 0:
+                reg_loss = reg_loss + opt.lambda_edge_smooth * edge_aware_smoothness(rend_normal, gt_image, opt.edge_alpha)
+
         # FINAL LOSS
-        loss = loss_image + loss_weight + normal_loss  # + depth_loss
+        loss = loss_image + loss_weight + normal_loss + reg_loss  # + depth_loss
 
         loss.backward()
         iter_end.record()
@@ -198,6 +216,7 @@ def training(
             
             # Handle pruning operations
             if iteration % 500 == 0:
+                topology = None # pruning/densification below changes the mesh connectivity
 
                 print(torch.min(triangles.importance_score))
 
