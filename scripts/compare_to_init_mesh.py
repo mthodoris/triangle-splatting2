@@ -9,11 +9,18 @@
 #   - normal agreement at those nearest points (|cos|, winding-independent)
 #   - roughness: dihedral angle between adjacent faces over manifold edges
 #   - topology: vertices, faces, manifold / boundary / non-manifold edges
+#   - bad triangles: zero-area and sliver faces, oversized faces (longest edge
+#     well above the init mean edge) and the oversized faces that sit away from
+#     the init surface; with the run's checkpoint next to the mesh, also how
+#     opaque those faces are (i.e. whether they actually render)
 #
 # Usage:
 #   python scripts/compare_to_init_mesh.py --init init_mesh.ply \
 #       --meshes run_a/mesh/iteration_30000/mesh.ply run_b/mesh/iteration_30000/mesh.ply \
 #       [--names baseline reg] [--save_dist_ply out_dir]
+#
+# Checkpoints are found automatically at <run>/point_cloud/iteration_N/ for a
+# mesh at <run>/mesh/iteration_N/mesh.ply (needs torch; skipped otherwise).
 #
 
 import os
@@ -70,6 +77,59 @@ def topology(mesh):
     }
 
 
+def triangle_stats(mesh, unit, init_surface, opacity, sliver_q, big_edge, far):
+    """Degenerate and oversized faces. Lengths in init mean edges; *_area_% is the share of total surface area."""
+    tri = mesh.triangles
+    e = np.linalg.norm(tri[:, [1, 2, 0]] - tri, axis=2)  # [F,3] edge lengths
+    area = mesh.area_faces
+    with np.errstate(divide="ignore", invalid="ignore"):
+        quality = np.nan_to_num(4.0 * np.sqrt(3.0) * area / (e ** 2).sum(1))  # 1 = equilateral, 0 = degenerate
+    zero = area < 1e-6 * unit ** 2
+    sliver = quality < sliver_q
+    big = e.max(1) > big_edge * unit
+    big_far = np.zeros(len(area), dtype=bool)
+    if big.any():
+        d, _ = init_surface.query(mesh.triangles_center[big])
+        big_far[np.flatnonzero(big)[d > far * unit]] = True
+    total = max(area.sum(), 1e-30)
+    stats = {
+        "zero_area_%": 100.0 * zero.mean(),
+        "sliver_%": 100.0 * sliver.mean(),
+        "big_%": 100.0 * big.mean(),
+        "big_area_%": 100.0 * area[big].sum() / total,
+        "big_far_%": 100.0 * big_far.mean(),
+        "big_far_area_%": 100.0 * area[big_far].sum() / total,
+    }
+    if opacity is not None:
+        opaque = opacity >= 0.5
+        stats["opaque_%"] = 100.0 * opaque.mean()
+        stats["sliver_opaque_%"] = 100.0 * opaque[sliver].mean() if sliver.any() else float("nan")
+        stats["big_far_opaque_%"] = 100.0 * opaque[big_far].mean() if big_far.any() else float("nan")
+    return stats
+
+
+def triangle_opacity(mesh_path, n_faces):
+    """Mean vertex opacity per face from the run's checkpoint, or None if it cannot be found or does not match."""
+    parts = os.path.normpath(os.path.abspath(mesh_path)).split(os.sep)
+    if len(parts) < 4 or parts[-3] != "mesh":
+        return None
+    ckpt = os.path.join(os.sep.join(parts[:-3]), "point_cloud", parts[-2], "point_cloud_state_dict.pt")
+    if not os.path.exists(ckpt):
+        return None
+    try:
+        import torch
+    except ImportError:
+        return None
+    state = torch.load(ckpt, map_location="cpu")
+    faces = state["_triangle_indices"].long()
+    if len(faces) != n_faces:
+        print("  {}: checkpoint has {} faces, mesh {}; skipping opacity".format(ckpt, len(faces), n_faces))
+        return None
+    floor = state.get("opacity_floor", 0.9999)  # same default as TriangleModel.load_parameters
+    vertex = floor + (1.0 - floor) * torch.sigmoid(state["vertex_weight"].detach().float().reshape(-1))
+    return vertex[faces].mean(1).numpy()
+
+
 def compare(init_surface, init_pts, init_nrm, mesh, n, unit, tau):
     pts, nrm = sample(mesh, n, seed=1)
     surface = Surface(mesh)
@@ -109,6 +169,9 @@ if __name__ == "__main__":
     parser.add_argument("--names", nargs="+", default=None)
     parser.add_argument("--samples", type=int, default=1_000_000)
     parser.add_argument("--tau", type=float, default=1.0, help="F-score threshold, in init mean edge lengths")
+    parser.add_argument("--sliver_q", type=float, default=0.05, help="sliver: shape quality below this (1 = equilateral)")
+    parser.add_argument("--big_edge", type=float, default=5.0, help="oversized: longest edge above this many init mean edges")
+    parser.add_argument("--far", type=float, default=2.0, help="oversized face counts as away from the init surface beyond this many edges")
     parser.add_argument("--save_dist_ply", default=None, help="directory for distance-colored copies of the trained meshes")
     args = parser.parse_args()
 
@@ -120,11 +183,14 @@ if __name__ == "__main__":
     init_pts, init_nrm = sample(init, args.samples, seed=0)
     init_surface = Surface(init)
     print("init: {}  (mean edge length {:.5f}; distances below are in these units)".format(args.init, unit))
+    print("bad triangles: sliver quality < {}, oversized longest edge > {} edges, far > {} edges from init; opaque = mean opacity >= 0.5".format(args.sliver_q, args.big_edge, args.far))
+    bad = lambda m, op: triangle_stats(m, unit, init_surface, op, args.sliver_q, args.big_edge, args.far)
 
-    rows = {"init": topology(init)}
+    rows = {"init": {**topology(init), **bad(init, None)}}
     for name, path in zip(names, args.meshes):
         mesh = trimesh.load(path, process=False)
-        rows[name] = {**topology(mesh), **compare(init_surface, init_pts, init_nrm, mesh, args.samples, unit, args.tau)}
+        opacity = triangle_opacity(path, len(mesh.faces))
+        rows[name] = {**topology(mesh), **compare(init_surface, init_pts, init_nrm, mesh, args.samples, unit, args.tau), **bad(mesh, opacity)}
         if args.save_dist_ply:
             os.makedirs(args.save_dist_ply, exist_ok=True)
             save_distance_ply(init_surface, mesh, unit, os.path.join(args.save_dist_ply, name + "_dist_to_init.ply"))
