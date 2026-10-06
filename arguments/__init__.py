@@ -133,6 +133,7 @@ class OptimizationParams(ParamGroup):
         self.no_prune = False
         self.sigma_until = 30000
         self.final_opacity_iter = 24000
+        self.final_opacity = 0.9999 # opacity floor reached at final_opacity_iter
 
         self.sigma_start = 0
 
