@@ -91,6 +91,7 @@ class TriangleModel:
         point_cloud_state_dict["features_rest"] = self._features_rest
         point_cloud_state_dict["importance_score"] = self.importance_score
         point_cloud_state_dict["image_size"] = self.image_size
+        point_cloud_state_dict["opacity_floor"] = self.opacity_floor
 
         torch.save(point_cloud_state_dict, os.path.join(path, 'point_cloud_state_dict.pt'))
 
@@ -134,7 +135,9 @@ class TriangleModel:
         ################################################################
 
 
-        self.opacity_floor = 0.9999
+        # the floor the model was trained with (vertex_weight logits are relative to it);
+        # older checkpoints did not store it and always ended training at 0.9999
+        self.opacity_floor = state.get("opacity_floor", 0.9999)
 
         # 3. (Re)compute any derived quantities
 
