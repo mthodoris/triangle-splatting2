@@ -122,10 +122,14 @@ def triangle_opacity(mesh_path, n_faces):
         return None
     state = torch.load(ckpt, map_location="cpu")
     faces = state["_triangle_indices"].long()
+    floor = state.get("opacity_floor", 0.9999)  # same default as TriangleModel.load_parameters
+    if "vertex_is_mesh" in state:  # --free_triangles: mesh.ply holds the mesh group only
+        is_mesh = state["vertex_is_mesh"].bool().cpu()
+        faces = faces[is_mesh[faces[:, 0]]]
+        floor = torch.where(is_mesh, torch.tensor(floor), torch.tensor(state["free_opacity_floor"]))
     if len(faces) != n_faces:
         print("  {}: checkpoint has {} faces, mesh {}; skipping opacity".format(ckpt, len(faces), n_faces))
         return None
-    floor = state.get("opacity_floor", 0.9999)  # same default as TriangleModel.load_parameters
     vertex = floor + (1.0 - floor) * torch.sigmoid(state["vertex_weight"].detach().float().reshape(-1))
     return vertex[faces].mean(1).numpy()
 

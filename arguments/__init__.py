@@ -64,6 +64,8 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.mesh_path = ""
+        self.free_triangles = False # with --mesh_path: add free triangles from SfM points away from the mesh
+        self.free_min_dist = 3.0 # SfM points farther than this many init mean edges from the mesh seed free triangles
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -136,7 +138,8 @@ class OptimizationParams(ParamGroup):
         self.no_prune = False
         self.sigma_until = 30000
         self.final_opacity_iter = 24000
-        self.final_opacity = 0.9999 # opacity floor reached at final_opacity_iter
+        self.final_opacity = 0.9999 # opacity floor reached at final_opacity_iter (mesh group with --free_triangles)
+        self.free_final_opacity = 0.9999 # same for the free group (--free_triangles)
 
         self.sigma_start = 0
 

@@ -93,7 +93,9 @@ class Scene:
                                     )
         elif getattr(args, "mesh_path", ""):
             print("Loading predefined mesh from {}".format(args.mesh_path))
-            self.triangles.create_from_mesh(args.mesh_path, init_opacity, set_sigma)
+            self.triangles.create_from_mesh(args.mesh_path, init_opacity, set_sigma,
+                                             free_pcd=scene_info.point_cloud if getattr(args, "free_triangles", False) else None,
+                                             free_min_dist=getattr(args, "free_min_dist", 3.0))
         else:
             self.triangles.create_from_pcd(scene_info.point_cloud, init_opacity, set_sigma)
 

@@ -79,6 +79,14 @@ class TriangleModel:
         self._anchor_normal = None
         self.init_edge = None
 
+        # Two triangle groups (only with --free_triangles): the mesh group (init mesh and
+        # its subdivisions) and free triangles seeded from SfM points the mesh does not
+        # explain. Groups never share vertices. _vertex_is_mesh is None without groups.
+        # free_opacity_floor is the free group's floor; opacity_floor is the mesh group's
+        # (and everyone's, without groups).
+        self._vertex_is_mesh = None
+        self.free_opacity_floor = None
+
         self.scaling = 1
 
         self.setup_functions()
@@ -99,6 +107,9 @@ class TriangleModel:
         point_cloud_state_dict["importance_score"] = self.importance_score
         point_cloud_state_dict["image_size"] = self.image_size
         point_cloud_state_dict["opacity_floor"] = self.opacity_floor
+        if self._vertex_is_mesh is not None:
+            point_cloud_state_dict["vertex_is_mesh"] = self._vertex_is_mesh
+            point_cloud_state_dict["free_opacity_floor"] = self.free_opacity_floor
 
         torch.save(point_cloud_state_dict, os.path.join(path, 'point_cloud_state_dict.pt'))
 
@@ -145,6 +156,9 @@ class TriangleModel:
         # the floor the model was trained with (vertex_weight logits are relative to it);
         # older checkpoints did not store it and always ended training at 0.9999
         self.opacity_floor = state.get("opacity_floor", 0.9999)
+        if "vertex_is_mesh" in state:
+            self._vertex_is_mesh = state["vertex_is_mesh"].to(device).bool()
+            self.free_opacity_floor = state["free_opacity_floor"]
 
         # 3. (Re)compute any derived quantities
 
@@ -224,7 +238,27 @@ class TriangleModel:
 
     @property
     def get_vertex_weight(self):
-        return self.opacity_activation(self.vertex_weight)
+        f = self.vertex_floor()
+        return f + (1.0 - f) * torch.sigmoid(self.vertex_weight)
+
+    def vertex_floor(self, idx=None):
+        """Opacity floor per vertex as [V,1] (or for vertices idx), or the scalar floor without groups."""
+        if self._vertex_is_mesh is None:
+            return self.opacity_floor
+        is_mesh = self._vertex_is_mesh if idx is None else self._vertex_is_mesh[idx]
+        return torch.where(is_mesh, self.opacity_floor, self.free_opacity_floor).unsqueeze(-1).to(torch.float32)
+
+    def inverse_opacity(self, y, floor):
+        """Logit that gives opacity y under floor (scalar or per-vertex [V,1]); same as the scalar inverse_opacity_activation."""
+        lo = floor + self.eps if torch.is_tensor(floor) else torch.full_like(y, floor + self.eps)
+        y = torch.maximum(y, lo).clamp(max=1.0 - self.eps)
+        return inverse_sigmoid((y - floor) / (1.0 - floor + self.eps))
+
+    def triangle_is_mesh(self):
+        """[T] bool: triangle belongs to the mesh group (all True without groups)."""
+        if self._vertex_is_mesh is None:
+            return torch.ones(self._triangle_indices.shape[0], dtype=torch.bool, device=self._triangle_indices.device)
+        return self._vertex_is_mesh[self._triangle_indices[:, 0].long()]
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -287,7 +321,7 @@ class TriangleModel:
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
 
 
-    def create_from_mesh(self, mesh_path : str, opacity : float, set_sigma : float):
+    def create_from_mesh(self, mesh_path : str, opacity : float, set_sigma : float, free_pcd : BasicPointCloud = None, free_min_dist : float = 3.0):
         """Initialize the triangle model from a predefined mesh instead of running
         Delaunay triangulation on a point cloud. The mesh's own vertices and faces
         are used directly, so its topology is preserved."""
@@ -301,6 +335,48 @@ class TriangleModel:
             vertex_colors = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.float32) / 255.0
         else:
             vertex_colors = np.full((_points.shape[0], 3), 0.5, dtype=np.float32)
+
+        num_mesh_vertices = _points.shape[0]
+        anchor_normal = torch.nn.functional.normalize(torch.tensor(np.asarray(mesh.vertex_normals)).float().cuda(), dim=1)
+        init_edge = float(mesh.edges_unique_length.mean())
+
+        if free_pcd is not None:
+            # Free triangles: one small, randomly oriented triangle per SfM point farther than
+            # free_min_dist init edges from the mesh (nearest mesh vertex or face centroid).
+            # Its circumradius is half the mean distance to the point's 3 nearest SfM
+            # neighbours. (Delaunay on these sparse leftover points gives huge triangles
+            # spanning the scene.)
+            pts = np.round(np.asarray(free_pcd.points), decimals=6)
+            _, unique_indices = np.unique(pts, axis=0, return_index=True)
+            unique_indices = np.sort(unique_indices)
+            pts = torch.tensor(pts[unique_indices]).float().cuda()
+            cols = np.asarray(free_pcd.colors)[unique_indices].astype(np.float32)
+            spacing = knn_points(pts[None], pts[None], K=4).dists[0, :, 1:].sqrt().mean(1)
+            surface = torch.cat([_points, torch.tensor(np.asarray(mesh.triangles_center)).float().cuda()], dim=0)
+            dist = knn_points(pts[None], surface[None], K=1).dists[0, :, 0].sqrt()
+            keep = dist > free_min_dist * init_edge
+            pts, spacing, cols = pts[keep], spacing[keep], cols[keep.cpu().numpy()]
+            print("Free triangles: {} of {} SfM points are more than {} init edges from the mesh".format(
+                pts.shape[0], keep.numel(), free_min_dist))
+            if pts.shape[0] > 0:
+                gen = torch.Generator(device="cuda").manual_seed(0)
+                n = torch.nn.functional.normalize(torch.randn(pts.shape[0], 3, device="cuda", generator=gen), dim=1)
+                helper = torch.where(n[:, :1].abs() < 0.9, torch.tensor([1.0, 0.0, 0.0], device="cuda"), torch.tensor([0.0, 1.0, 0.0], device="cuda"))
+                e1 = torch.nn.functional.normalize(torch.cross(n, helper, dim=1), dim=1)
+                e2 = torch.cross(n, e1, dim=1)
+                r = (0.5 * spacing)[:, None]
+                angles = torch.tensor([0.0, 2.0943951, 4.1887902], device="cuda")
+                corners = torch.stack([pts + r * (torch.cos(t) * e1 + torch.sin(t) * e2) for t in angles], dim=1)  # [P,3,3]
+                free_points = corners.reshape(-1, 3)
+                free_faces = torch.arange(free_points.shape[0], device="cuda").reshape(-1, 3)
+                print("Free triangles: {} triangles, median circumradius {:.2f} init edges".format(
+                    free_faces.shape[0], (r.median() / init_edge).item()))
+                _points = torch.cat([_points, free_points], dim=0)
+                faces = torch.cat([faces, free_faces + num_mesh_vertices], dim=0)
+                vertex_colors = np.concatenate([vertex_colors, np.repeat(cols, 3, axis=0)], axis=0)
+                anchor_normal = torch.cat([anchor_normal, torch.zeros_like(free_points)], dim=0)  # unused for free vertices
+            self._vertex_is_mesh = torch.arange(_points.shape[0], device="cuda") < num_mesh_vertices
+            self.free_opacity_floor = self.opacity_floor
 
         fused_color = RGB2SH(torch.tensor(vertex_colors).float().cuda())
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -321,8 +397,8 @@ class TriangleModel:
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
 
         self._anchor = _points.detach().clone()
-        self._anchor_normal = torch.nn.functional.normalize(torch.tensor(np.asarray(mesh.vertex_normals)).float().cuda(), dim=1)
-        self.init_edge = float(mesh.edges_unique_length.mean())
+        self._anchor_normal = anchor_normal
+        self.init_edge = init_edge
 
 
     def project_to_anchor_normals(self, max_offset):
@@ -330,7 +406,10 @@ class TriangleModel:
         at most max_offset away from the anchor (normal-only vertex motion)."""
         with torch.no_grad():
             offset = ((self.vertices - self._anchor) * self._anchor_normal).sum(1, keepdim=True).clamp(-max_offset, max_offset)
-            self.vertices.copy_(self._anchor + offset * self._anchor_normal)
+            projected = self._anchor + offset * self._anchor_normal
+            if self._vertex_is_mesh is not None:
+                projected = torch.where(self._vertex_is_mesh[:, None], projected, self.vertices)
+            self.vertices.copy_(projected)
 
 
     def extract_mesh(self, path, iteration):
@@ -342,6 +421,12 @@ class TriangleModel:
 
         vertices = self.vertices.detach().cpu().numpy()
         faces = self._triangle_indices.detach().cpu().numpy().astype(np.int64)
+        if self._vertex_is_mesh is not None:
+            # mesh.ply holds the mesh group only; all_triangles.ply holds both groups
+            vertex_colors_all = (SH2RGB(self._features_dc.detach().squeeze(1)).clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
+            trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=vertex_colors_all, process=False).export(
+                os.path.join(mesh_path, "all_triangles.ply"))
+            faces = faces[self.triangle_is_mesh().cpu().numpy()]
 
         vertex_colors = SH2RGB(self._features_dc.detach().squeeze(1)).clamp(0.0, 1.0)
         vertex_colors = (vertex_colors.cpu().numpy() * 255.0).astype(np.uint8)
@@ -464,6 +549,8 @@ class TriangleModel:
         if self._anchor is not None:
             self._anchor = torch.cat([self._anchor, new_anchor], dim=0)
             self._anchor_normal = torch.cat([self._anchor_normal, new_anchor_normal], dim=0)
+        if self._vertex_is_mesh is not None:
+            self._vertex_is_mesh = torch.cat([self._vertex_is_mesh, self._new_vertex_is_mesh], dim=0)
 
         # Update triangle indices
         self._triangle_indices = torch.cat([
@@ -535,14 +622,15 @@ class TriangleModel:
         new_features_dc = (self._features_dc[u] + self._features_dc[v]) / 2.0
         new_features_rest = (self._features_rest[u] + self._features_rest[v]) / 2.0
         
-        opacity_u = self.opacity_activation(self.vertex_weight[u])
-        opacity_v = self.opacity_activation(self.vertex_weight[v])
-        avg_opacity = (opacity_u + opacity_v) / 2.0
-        avg_opacity = torch.clamp(avg_opacity, self.opacity_floor + self.eps, 1 - self.eps)
-        new_vertex_weight = self.inverse_opacity_activation(avg_opacity)
+        weights = self.get_vertex_weight
+        avg_opacity = (weights[u] + weights[v]) / 2.0
+        floor_new = self.vertex_floor(u)  # midpoints join their parents' group
+        new_vertex_weight = self.inverse_opacity(avg_opacity, floor_new)
 
         new_triangles = subdivided_triangles
 
+        if self._vertex_is_mesh is not None:
+            self._new_vertex_is_mesh = self._vertex_is_mesh[u]
         new_anchor = new_anchor_normal = None
         if self._anchor is not None:
             new_anchor = (self._anchor[u] + self._anchor[v]) / 2.0
@@ -583,6 +671,8 @@ class TriangleModel:
         if self._anchor is not None:
             self._anchor = self._anchor[mask]
             self._anchor_normal = self._anchor_normal[mask]
+        if self._vertex_is_mesh is not None:
+            self._vertex_is_mesh = self._vertex_is_mesh[mask]
 
         # Update model parameters
         for name, tensor in optimizable_tensors.items():
@@ -708,17 +798,19 @@ class TriangleModel:
 
 
 
-    def update_min_weight(self, new_min_weight: float, preserve_outputs: bool = True):
+    def update_min_weight(self, new_min_weight: float, preserve_outputs: bool = True, new_free_min_weight: float = None):
+        """Raise the floor (mesh group, or everyone without groups; free group: new_free_min_weight)
+        while keeping every vertex's current opacity unless it is below its new floor."""
         new_m = float(max(0.0, min(new_min_weight, 1.0 - 1e-4)))
 
         # 1) grab the current realized opacities y (under the old floor)
         with torch.no_grad():
             y = self.get_vertex_weight.detach()
-            y = y.clamp(new_m + self.eps, 1.0 - self.eps)   # clamp to the *new* floor
         self.opacity_floor = new_m
-        new_logits = self.inverse_opacity_activation(y)
+        if self._vertex_is_mesh is not None and new_free_min_weight is not None:
+            self.free_opacity_floor = float(max(0.0, min(new_free_min_weight, 1.0 - 1e-4)))
         with torch.no_grad():
-            self.vertex_weight.data.copy_(new_logits)
+            self.vertex_weight.data.copy_(self.inverse_opacity(y, self.vertex_floor()))
 
 
     def triangle_areas(self):

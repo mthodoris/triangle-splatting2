@@ -183,16 +183,17 @@ def training(
         if iteration > opt.iteration_mesh:
             if use_mesh_reg and triangles._triangle_indices.numel() > 0:
                 if topology is None:
-                    topology = mesh_topology(triangles._triangle_indices)
+                    reg_faces = triangles._triangle_indices[triangles.triangle_is_mesh()]  # mesh group only
+                    topology = mesh_topology(reg_faces)
                 if opt.lambda_laplacian > 0:
-                    edge_w = crease_weights(triangles.vertices, triangles._triangle_indices, topology, opt.crease_sigma)
+                    edge_w = crease_weights(triangles.vertices, reg_faces, topology, opt.crease_sigma)
                     reg_loss = reg_loss + opt.lambda_laplacian * laplacian_loss(triangles.vertices, topology[0], edge_w, topology[4])
                 if opt.lambda_tangential_laplacian > 0:
                     reg_loss = reg_loss + opt.lambda_tangential_laplacian * tangential_laplacian_loss(
                         triangles.vertices, topology[0], triangles._anchor_normal, topology[4])
                 if opt.lambda_normal_consistency > 0:
                     reg_loss = reg_loss + opt.lambda_normal_consistency * edge_aware_normal_consistency(
-                        triangles.vertices, triangles._triangle_indices, topology, opt.crease_sigma)
+                        triangles.vertices, reg_faces, topology, opt.crease_sigma)
             if opt.lambda_edge_smooth > 0:
                 reg_loss = reg_loss + opt.lambda_edge_smooth * edge_aware_smoothness(rend_normal, gt_image, opt.edge_alpha)
 
@@ -226,9 +227,7 @@ def training(
                 print(torch.min(triangles.importance_score))
 
                 # --- Build condition masks (all mean "DELETE") ---
-                triangle_vertex_weights = triangles.opacity_activation(
-                    triangles.vertex_weight[triangles._triangle_indices]
-                )  # [T,3]
+                triangle_vertex_weights = triangles.get_vertex_weight[triangles._triangle_indices]  # [T,3,1]
                 min_weights = triangle_vertex_weights.min(dim=1).values  # [T]
 
                 mask_opacity     = (min_weights <= prune_triangles).squeeze()              # delete if too low
@@ -236,13 +235,16 @@ def training(
                 mask_size        = (triangles.image_size > prune_size).squeeze()                 # delete if too big
 
                 delete_mask = mask_opacity | mask_importance | mask_size
+                if opt.no_prune:
+                    # protect the mesh group (everything, without --free_triangles)
+                    delete_mask = delete_mask & ~triangles.triangle_is_mesh()
                 keep_mask   = ~delete_mask  # prune_triangles keeps True
 
                 # --- Apply pruning (keep=True) ---
-                if iteration > opt.start_pruning and not opt.no_prune:
+                if iteration > opt.start_pruning and delete_mask.any():
                     triangles.prune_triangles(keep_mask)
 
-                if not opt.no_prune:
+                if not opt.no_prune or triangles._vertex_is_mesh is not None:
                     # We prune vertices that are no longer used
                     device = triangles.vertices.device
                     used_vertex_mask = torch.zeros(triangles.vertices.shape[0],
@@ -256,13 +258,13 @@ def training(
                     # Combine conditions: keep vertices if used OR weight above threshold
                     weight_mask = (triangles.get_vertex_weight.squeeze() >= prune_triangles)
                     vertex_mask = weight_mask | used_vertex_mask
+                    if opt.no_prune:
+                        vertex_mask = vertex_mask | triangles._vertex_is_mesh
 
                     triangles._prune_vertices(vertex_mask)
 
 
-                triangle_vertex_weights = triangles.opacity_activation(
-                    triangles.vertex_weight[triangles._triangle_indices]
-                )  # [T,3]
+                triangle_vertex_weights = triangles.get_vertex_weight[triangles._triangle_indices]  # [T,3,1]
                 min_weights = triangle_vertex_weights.min(dim=1).values
 
                 
@@ -291,7 +293,8 @@ def training(
                     a = min(1.0, max(0.0, (iteration - start_iter) / max(1, end_iter - start_iter)))
                     current_opacity = init_opacity + (final_opacity - init_opacity) * a
                     current_opacity = min(current_opacity, final_opacity)
-                    triangles.update_min_weight(current_opacity)
+                    current_free = min(init_opacity + (opt.free_final_opacity - init_opacity) * a, opt.free_final_opacity)
+                    triangles.update_min_weight(current_opacity, new_free_min_weight=current_free)
 
                     prune_triangles += 0.01 
 
@@ -319,6 +322,18 @@ def training(
             triangles.importance_score[mask] = importance_score[mask]
         mask_importance  = (triangles.importance_score <= 0.5).squeeze()
         triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
+    elif triangles._vertex_is_mesh is not None:
+        # --no_prune with free triangles: the same cleanup, for the free group only
+        viewpoint_stack = scene.getTrainCameras().copy()
+        triangles.importance_score = torch.zeros((triangles._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
+        while viewpoint_stack:
+            viewpoint_cam = viewpoint_stack.pop(0)
+            render_pkg = render(viewpoint_cam, triangles, pipe, bg)
+            importance_score = render_pkg["max_blending"].detach()
+            mask = importance_score > triangles.importance_score
+            triangles.importance_score[mask] = importance_score[mask]
+        mask_importance = (triangles.importance_score <= 0.5).squeeze() & ~triangles.triangle_is_mesh()
+        triangles.prune_triangles(~mask_importance)
 
     scene.save(iteration)
     mesh_file = scene.save_mesh(iteration)
