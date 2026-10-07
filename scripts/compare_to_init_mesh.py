@@ -9,6 +9,9 @@
 #   - normal agreement at those nearest points (|cos|, winding-independent)
 #   - roughness: dihedral angle between adjacent faces over manifold edges
 #   - topology: vertices, faces, manifold / boundary / non-manifold edges
+#   - tangling: faces tilted more than --tilt degrees from the init surface normal
+#     nearby, self-intersecting faces (sampled; pairs sharing a vertex excluded)
+#     and the triangle shape-quality distribution
 #   - bad triangles: zero-area and sliver faces, oversized faces (longest edge
 #     well above the init mean edge) and the oversized faces that sit away from
 #     the init surface; with the run's checkpoint next to the mesh, also how
@@ -108,6 +111,60 @@ def triangle_stats(mesh, unit, init_surface, opacity, sliver_q, big_edge, far):
     return stats
 
 
+def segments_hit_triangles(p, q, a, b, c, eps=1e-9):
+    """[N] bool: segment p->q crosses triangle abc (Moller-Trumbore, open segment)."""
+    e1, e2, d = b - a, c - a, q - p
+    h = np.cross(d, e2)
+    det = (e1 * h).sum(1)
+    ok = np.abs(det) > eps
+    inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+    s = p - a
+    u = (s * h).sum(1) * inv
+    qv = np.cross(s, e1)
+    v = (d * qv).sum(1) * inv
+    t = (e2 * qv).sum(1) * inv
+    return ok & (u > eps) & (v > eps) & (u + v < 1 - eps) & (t > eps) & (t < 1 - eps)
+
+
+def tangling_stats(mesh, init_surface, tilt_deg, n_sample, k=16, seed=0):
+    """Tilted faces vs the init surface, sampled self-intersections, and triangle shape quality."""
+    tri = mesh.triangles
+    area = mesh.area_faces
+    total = max(area.sum(), 1e-30)
+    _, nearest = init_surface.query(mesh.triangles_center)
+    cos = np.abs((mesh.face_normals * init_surface.normals[nearest]).sum(1))
+    tilted = cos < np.cos(np.radians(tilt_deg))
+    e = np.linalg.norm(tri[:, [1, 2, 0]] - tri, axis=2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        quality = np.nan_to_num(4.0 * np.sqrt(3.0) * area / (e ** 2).sum(1))
+
+    # self-intersections: sampled faces against their k nearest faces (by centroid) that share no vertex
+    rng = np.random.default_rng(seed)
+    valid = np.flatnonzero(area > 0)
+    sample = rng.choice(valid, size=min(n_sample, len(valid)), replace=False)
+    tree = cKDTree(mesh.triangles_center[valid])
+    _, nb = tree.query(mesh.triangles_center[sample], k=k + 1, workers=-1)
+    nb = valid[nb]
+    F = mesh.faces
+    hit = np.zeros(len(sample), dtype=bool)
+    for j in range(1, k + 1):
+        A, B = sample, nb[:, j]
+        share = (F[A][:, :, None] == F[B][:, None, :]).any((1, 2))
+        T1, T2 = tri[A], tri[B]
+        x = np.zeros(len(A), dtype=bool)
+        for i0, i1 in ((0, 1), (1, 2), (2, 0)):
+            x |= segments_hit_triangles(T1[:, i0], T1[:, i1], T2[:, 0], T2[:, 1], T2[:, 2])
+            x |= segments_hit_triangles(T2[:, i0], T2[:, i1], T1[:, 0], T1[:, 1], T1[:, 2])
+        hit |= x & ~share
+    return {
+        "tilted_%": 100.0 * tilted.mean(),
+        "tilted_area_%": 100.0 * area[tilted].sum() / total,
+        "self_intersect_%": 100.0 * hit.mean(),
+        "quality_median": float(np.median(quality)),
+        "quality_<0.3_%": 100.0 * (quality < 0.3).mean(),
+    }
+
+
 def triangle_opacity(mesh_path, n_faces):
     """Mean vertex opacity per face from the run's checkpoint, or None if it cannot be found or does not match."""
     parts = os.path.normpath(os.path.abspath(mesh_path)).split(os.sep)
@@ -176,6 +233,8 @@ if __name__ == "__main__":
     parser.add_argument("--sliver_q", type=float, default=0.05, help="sliver: shape quality below this (1 = equilateral)")
     parser.add_argument("--big_edge", type=float, default=5.0, help="oversized: longest edge above this many init mean edges")
     parser.add_argument("--far", type=float, default=2.0, help="oversized face counts as away from the init surface beyond this many edges")
+    parser.add_argument("--tilt", type=float, default=60.0, help="tilted: face normal more than this many degrees from the init surface normal")
+    parser.add_argument("--intersect_samples", type=int, default=200_000, help="faces sampled for the self-intersection check")
     parser.add_argument("--save_dist_ply", default=None, help="directory for distance-colored copies of the trained meshes")
     args = parser.parse_args()
 
@@ -187,8 +246,10 @@ if __name__ == "__main__":
     init_pts, init_nrm = sample(init, args.samples, seed=0)
     init_surface = Surface(init)
     print("init: {}  (mean edge length {:.5f}; distances below are in these units)".format(args.init, unit))
+    print("tangling: tilted > {} deg from the init surface normal; self-intersections from {} sampled faces; boundary_% = open edges (cracks, T-junctions)".format(args.tilt, args.intersect_samples))
     print("bad triangles: sliver quality < {}, oversized longest edge > {} edges, far > {} edges from init; opaque = mean opacity >= 0.5".format(args.sliver_q, args.big_edge, args.far))
-    bad = lambda m, op: triangle_stats(m, unit, init_surface, op, args.sliver_q, args.big_edge, args.far)
+    bad = lambda m, op: {**tangling_stats(m, init_surface, args.tilt, args.intersect_samples),
+                         **triangle_stats(m, unit, init_surface, op, args.sliver_q, args.big_edge, args.far)}
 
     rows = {"init": {**topology(init), **bad(init, None)}}
     for name, path in zip(names, args.meshes):
