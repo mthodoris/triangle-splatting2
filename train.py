@@ -23,6 +23,7 @@ import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, laplacian_loss, edge_aware_normal_consistency, edge_aware_smoothness, tangential_laplacian_loss
 from triangle_renderer import render
+from utils.large_steps import LargeSteps
 import sys
 from scene import Scene, TriangleModel
 from utils.general_utils import safe_state
@@ -105,6 +106,17 @@ def training(
     use_mesh_reg = opt.lambda_laplacian > 0 or opt.lambda_normal_consistency > 0 or opt.lambda_tangential_laplacian > 0
     if (opt.normal_only_motion or opt.lambda_tangential_laplacian > 0) and triangles._anchor is None:
         raise ValueError("--normal_only_motion and --lambda_tangential_laplacian need --mesh_path")
+
+    large_steps = None
+    if opt.large_steps:
+        if triangles._anchor is None or not opt.no_mesh_densify:
+            raise ValueError("--large_steps needs --mesh_path and --no_mesh_densify (fixed mesh topology)")
+        num_mesh = triangles.vertices.shape[0] if triangles._vertex_is_mesh is None else int(triangles._vertex_is_mesh.sum().item())
+        assert triangles._vertex_is_mesh is None or bool(triangles._vertex_is_mesh[:num_mesh].all()), "mesh vertices must come first"
+        large_steps = LargeSteps(triangles.vertices.detach()[:num_mesh], triangles._triangle_indices[triangles.triangle_is_mesh()],
+                                 opt.ls_lambda, cg_iters=opt.ls_cg_iters)
+        print("Large steps on {} mesh vertices, lambda {}".format(num_mesh, opt.ls_lambda))
+    ls_residual = float("nan")
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -304,6 +316,13 @@ def training(
 
 
             if iteration < opt.iterations:
+                if large_steps is not None:
+                    vertex_lr = next(g["lr"] for g in triangles.optimizer.param_groups if g["name"] == "vertices")
+                    residual = large_steps.step(triangles.vertices, vertex_lr * opt.ls_lr_mult)
+                    if residual == residual:  # nan when this step had no gradient (densification step)
+                        ls_residual = residual
+                    if iteration % 1000 == 0:
+                        print("[ITER {}] large steps: CG relative residual {:.2e}".format(iteration, ls_residual))
                 triangles.optimizer.step()
                 triangles.optimizer.zero_grad(set_to_none = True)
                 if opt.normal_only_motion:

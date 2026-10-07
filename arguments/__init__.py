@@ -140,6 +140,10 @@ class OptimizationParams(ParamGroup):
         self.final_opacity_iter = 24000
         self.final_opacity = 0.9999 # opacity floor reached at final_opacity_iter (mesh group with --free_triangles)
         self.free_final_opacity = 0.9999 # same for the free group (--free_triangles)
+        self.large_steps = False # smooth mesh-vertex updates, Nicolet et al. 2021 (needs --no_mesh_densify)
+        self.ls_lambda = 20.0 # smoothing strength: x = (I + lambda L)^-1 u
+        self.ls_lr_mult = 1.0 # mesh-vertex learning rate for large steps, as a multiple of the vertex lr schedule
+        self.ls_cg_iters = 10 # conjugate-gradient iterations for the gradient solve (positions use 5, warm-started)
         self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)
 
         self.sigma_start = 0
