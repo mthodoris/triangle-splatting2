@@ -86,6 +86,7 @@ class TriangleModel:
         # (and everyone's, without groups).
         self._vertex_is_mesh = None
         self.free_opacity_floor = None
+        self.no_mesh_densify = False # never split mesh-group triangles (keeps the init topology)
 
         self.scaling = 1
 
@@ -778,11 +779,23 @@ class TriangleModel:
         probs = torch.where(areas < self.size_probs_zero, torch.zeros_like(probs), probs)
         probs = torch.where(self.image_size < self.size_probs_zero_image_space, torch.zeros_like(probs), probs) # dont splitt if smaller than 10
 
-        rand_idx = self._sample_alives(probs=probs, num=num_gs)
+        if self.no_mesh_densify:
+            # only free triangles may be split (without --free_triangles: none); grow the free
+            # group by add_percentage of its own size, as the whole model grows without groups
+            splittable = ~self.triangle_is_mesh()
+            if not splittable.any():
+                return 0
+            probs = torch.where(splittable, probs, torch.zeros_like(probs))
+            areas = torch.where(splittable, areas, torch.full_like(areas, -1.0))
+            num_free = int((~self._vertex_is_mesh).sum().item())
+            num_gs = min(int(self.add_percentage * num_free) - num_free, cap_max - current_num_points)
+            num_gs = max(0, min(num_gs, int((probs > 0).sum().item())))
+
+        rand_idx = self._sample_alives(probs=probs, num=num_gs) if num_gs > 0 else torch.empty(0, dtype=torch.long, device=probs.device)
 
         # Split the largest triangles
         split_large = splitt_large_triangles
-        k = min(split_large, areas.numel())  
+        k = min(split_large, int((areas >= 0).sum().item()))
         _, top_idx = torch.topk(areas, k, largest=True, sorted=False)
 
         # 3) combine and deduplicate

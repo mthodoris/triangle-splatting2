@@ -140,6 +140,7 @@ class OptimizationParams(ParamGroup):
         self.final_opacity_iter = 24000
         self.final_opacity = 0.9999 # opacity floor reached at final_opacity_iter (mesh group with --free_triangles)
         self.free_final_opacity = 0.9999 # same for the free group (--free_triangles)
+        self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)
 
         self.sigma_start = 0
 

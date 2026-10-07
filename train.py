@@ -100,6 +100,7 @@ def training(
     splitt_large_triangles = opt.splitt_large_triangles
     triangles.size_probs_zero = opt.size_probs_zero
     triangles.size_probs_zero_image_space = opt.size_probs_zero_image_space
+    triangles.no_mesh_densify = opt.no_mesh_densify
 
     use_mesh_reg = opt.lambda_laplacian > 0 or opt.lambda_normal_consistency > 0 or opt.lambda_tangential_laplacian > 0
     if (opt.normal_only_motion or opt.lambda_tangential_laplacian > 0) and triangles._anchor is None:
