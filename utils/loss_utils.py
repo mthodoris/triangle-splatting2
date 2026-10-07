@@ -269,3 +269,25 @@ def edge_aware_smoothness(normal, image, alpha):
     w_x = torch.exp(-alpha * (image[:, :, 1:] - image[:, :, :-1]).abs().mean(0))
     w_y = torch.exp(-alpha * (image[:, 1:, :] - image[:, :-1, :]).abs().mean(0))
     return (dn_x * w_x).mean() + (dn_y * w_y).mean()
+
+
+def tangential_laplacian_loss(vertices, edges, normals, fixed_vertices=None):
+    """
+    Uniform Laplacian with the component along the vertex normal removed: evens out the
+    triangles along the surface (against stretching and slivers) without pulling the surface
+    itself. normals: [V,3] unit vertex normals (e.g. the init-mesh anchor normals).
+    """
+    i, j = edges[:, 0], edges[:, 1]
+    ones = torch.ones(i.shape[0], device=vertices.device)
+    nb = torch.zeros_like(vertices).index_add_(0, i, vertices[j]).index_add_(0, j, vertices[i])
+    deg = torch.zeros(vertices.shape[0], device=vertices.device).index_add_(0, i, ones).index_add_(0, j, ones)
+    used = deg > 0
+    if fixed_vertices is not None:
+        used[fixed_vertices] = False
+    if not used.any():
+        return torch.zeros((), device=vertices.device)
+    lap = vertices[used] - nb[used] / deg[used, None]
+    n = normals[used]
+    lap_t = lap - (lap * n).sum(1, keepdim=True) * n
+    scale = (vertices[i] - vertices[j]).norm(dim=1).mean().detach() + 1e-12
+    return (lap_t.norm(dim=1) / scale).mean()

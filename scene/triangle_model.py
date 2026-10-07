@@ -72,6 +72,13 @@ class TriangleModel:
         self.importance_score = 0
         self.add_percentage = 1.0
 
+        # Per-vertex init position and normal (mesh init only), kept in sync with the
+        # vertices through densification and pruning; used by --normal_only_motion and
+        # --lambda_tangential_laplacian. init_edge: mean edge length of the init mesh.
+        self._anchor = None
+        self._anchor_normal = None
+        self.init_edge = None
+
         self.scaling = 1
 
         self.setup_functions()
@@ -313,6 +320,18 @@ class TriangleModel:
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
 
+        self._anchor = _points.detach().clone()
+        self._anchor_normal = torch.nn.functional.normalize(torch.tensor(np.asarray(mesh.vertex_normals)).float().cuda(), dim=1)
+        self.init_edge = float(mesh.edges_unique_length.mean())
+
+
+    def project_to_anchor_normals(self, max_offset):
+        """Move every vertex back onto the line through its anchor along the anchor normal,
+        at most max_offset away from the anchor (normal-only vertex motion)."""
+        with torch.no_grad():
+            offset = ((self.vertices - self._anchor) * self._anchor_normal).sum(1, keepdim=True).clamp(-max_offset, max_offset)
+            self.vertices.copy_(self._anchor + offset * self._anchor_normal)
+
 
     def extract_mesh(self, path, iteration):
         """Export the current triangles as a colored mesh, using the trained
@@ -424,7 +443,7 @@ class TriangleModel:
         return optimizable_tensors
     
 
-    def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles):
+    def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor=None, new_anchor_normal=None):
         # Create dictionary of new tensors to append
         d = {
             "vertices": new_vertices,
@@ -442,6 +461,10 @@ class TriangleModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         
+        if self._anchor is not None:
+            self._anchor = torch.cat([self._anchor, new_anchor], dim=0)
+            self._anchor_normal = torch.cat([self._anchor_normal, new_anchor_normal], dim=0)
+
         # Update triangle indices
         self._triangle_indices = torch.cat([
             self._triangle_indices, 
@@ -498,7 +521,7 @@ class TriangleModel:
             m_bc = edge_to_midpoint[bc]
 
             new_triangles_list.append([a, m_ab, m_ac])
-            new_triangles_list.append([b, m_ab, m_bc])
+            new_triangles_list.append([b, m_bc, m_ab])  # keep the parent's winding
             new_triangles_list.append([c, m_ac, m_bc])
             new_triangles_list.append([m_ab, m_bc, m_ac])
         
@@ -519,13 +542,22 @@ class TriangleModel:
         new_vertex_weight = self.inverse_opacity_activation(avg_opacity)
 
         new_triangles = subdivided_triangles
-        
+
+        new_anchor = new_anchor_normal = None
+        if self._anchor is not None:
+            new_anchor = (self._anchor[u] + self._anchor[v]) / 2.0
+            n = self._anchor_normal[u] + self._anchor_normal[v]
+            new_anchor_normal = torch.where(n.norm(dim=1, keepdim=True) > 1e-6, n, self._anchor_normal[u])
+            new_anchor_normal = torch.nn.functional.normalize(new_anchor_normal, dim=1)
+
         return (
             new_vertices,
             new_vertex_weight,
             new_features_dc,
             new_features_rest,
-            new_triangles
+            new_triangles,
+            new_anchor,
+            new_anchor_normal
         )
 
 
@@ -548,6 +580,10 @@ class TriangleModel:
                     group['params'][0] = nn.Parameter(group['params'][0][mask].requires_grad_(True))
                     optimizable_tensors[group["name"]] = group['params'][0]
         
+        if self._anchor is not None:
+            self._anchor = self._anchor[mask]
+            self._anchor_normal = self._anchor_normal[mask]
+
         # Update model parameters
         for name, tensor in optimizable_tensors.items():
             if name == "vertices":
@@ -662,9 +698,9 @@ class TriangleModel:
         # 3) combine and deduplicate
         add_idx = torch.unique(torch.cat([rand_idx, top_idx.to(rand_idx.device)]), sorted=False)
 
-        (new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles) = self._update_params_fast(add_idx, iteration)
+        (new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor, new_anchor_normal) = self._update_params_fast(add_idx, iteration)
 
-        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles)
+        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor, new_anchor_normal)
 
         mask = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool)
         mask[add_idx] = False

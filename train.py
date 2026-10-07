@@ -21,7 +21,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, laplacian_loss, edge_aware_normal_consistency, edge_aware_smoothness
+from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, laplacian_loss, edge_aware_normal_consistency, edge_aware_smoothness, tangential_laplacian_loss
 from triangle_renderer import render
 import sys
 from scene import Scene, TriangleModel
@@ -101,7 +101,9 @@ def training(
     triangles.size_probs_zero = opt.size_probs_zero
     triangles.size_probs_zero_image_space = opt.size_probs_zero_image_space
 
-    use_mesh_reg = opt.lambda_laplacian > 0 or opt.lambda_normal_consistency > 0
+    use_mesh_reg = opt.lambda_laplacian > 0 or opt.lambda_normal_consistency > 0 or opt.lambda_tangential_laplacian > 0
+    if (opt.normal_only_motion or opt.lambda_tangential_laplacian > 0) and triangles._anchor is None:
+        raise ValueError("--normal_only_motion and --lambda_tangential_laplacian need --mesh_path")
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -185,6 +187,9 @@ def training(
                 if opt.lambda_laplacian > 0:
                     edge_w = crease_weights(triangles.vertices, triangles._triangle_indices, topology, opt.crease_sigma)
                     reg_loss = reg_loss + opt.lambda_laplacian * laplacian_loss(triangles.vertices, topology[0], edge_w, topology[4])
+                if opt.lambda_tangential_laplacian > 0:
+                    reg_loss = reg_loss + opt.lambda_tangential_laplacian * tangential_laplacian_loss(
+                        triangles.vertices, topology[0], triangles._anchor_normal, topology[4])
                 if opt.lambda_normal_consistency > 0:
                     reg_loss = reg_loss + opt.lambda_normal_consistency * edge_aware_normal_consistency(
                         triangles.vertices, triangles._triangle_indices, topology, opt.crease_sigma)
@@ -297,6 +302,8 @@ def training(
             if iteration < opt.iterations:
                 triangles.optimizer.step()
                 triangles.optimizer.zero_grad(set_to_none = True)
+                if opt.normal_only_motion:
+                    triangles.project_to_anchor_normals(opt.max_normal_offset * triangles.init_edge)
 
 
     # cleaning of triangles that we do not need

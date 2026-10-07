@@ -111,6 +111,9 @@ class OptimizationParams(ParamGroup):
         self.lambda_edge_smooth = 0.0
         self.crease_sigma = 0.1 # dihedral falloff: smaller keeps more creases sharp (90 deg -> weight ~0.05)
         self.edge_alpha = 10.0 # image-gradient falloff for edge-aware smoothness
+        self.lambda_tangential_laplacian = 0.0 # Laplacian along the surface only (needs --mesh_path)
+        self.normal_only_motion = False # vertices move only along their init normal (needs --mesh_path)
+        self.max_normal_offset = 5.0 # with --normal_only_motion: max distance from the init position, in init mean edges
 
         self.add_percentage = 1.23
 
