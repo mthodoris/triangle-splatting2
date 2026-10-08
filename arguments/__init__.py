@@ -144,6 +144,7 @@ class OptimizationParams(ParamGroup):
         self.ls_lambda = 20.0 # smoothing strength: x = (I + lambda L)^-1 u
         self.ls_lr_mult = 1.0 # mesh-vertex learning rate for large steps, as a multiple of the vertex lr schedule
         self.ls_cg_iters = 10 # conjugate-gradient iterations for the gradient solve (positions use 5, warm-started)
+        self.free_exclusion = 0.0 # with --free_triangles: every 500 iterations delete free triangles within about this many init mean edges of the mesh (0 = off)
         self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)
 
         self.sigma_start = 0

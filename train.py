@@ -300,6 +300,12 @@ def training(
                     triangles.add_new_gs(iteration, cap_max=opt.max_points, splitt_large_triangles=splitt_large_triangles, probs_opacity=probs_opacity)
    
 
+                if opt.free_exclusion > 0 and triangles._vertex_is_mesh is not None:
+                    removed = triangles.remove_free_near_mesh(opt.free_exclusion * triangles.init_edge)
+                    if iteration % 1000 == 0:
+                        print("[ITER {}] free triangles near the mesh removed: {}, free triangles left: {}".format(
+                            iteration, removed, int((~triangles.triangle_is_mesh()).sum().item())))
+
                 if iteration > opt.start_opacity_floor:
                     start_iter = opt.start_opacity_floor
                     end_iter = total_iters_opacity  # the iteration where you want to reach final_opacity
@@ -355,6 +361,8 @@ def training(
         mask_importance = (triangles.importance_score <= 0.5).squeeze() & ~triangles.triangle_is_mesh()
         triangles.prune_triangles(~mask_importance)
 
+    if opt.free_exclusion > 0 and triangles._vertex_is_mesh is not None:
+        triangles.remove_free_near_mesh(opt.free_exclusion * triangles.init_edge)
     scene.save(iteration)
     mesh_file = scene.save_mesh(iteration)
     print("Saved mesh to {}".format(mesh_file))

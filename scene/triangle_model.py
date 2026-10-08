@@ -261,6 +261,44 @@ class TriangleModel:
             return torch.ones(self._triangle_indices.shape[0], dtype=torch.bool, device=self._triangle_indices.device)
         return self._vertex_is_mesh[self._triangle_indices[:, 0].long()]
 
+    @torch.no_grad()
+    def remove_free_near_mesh(self, dist):
+        """Delete free triangles whose centroid lies in a voxel (edge dist) touched by the mesh or next to one,
+        i.e. roughly within dist..2*dist of the current mesh surface, and their unused vertices. Keeps free
+        triangles in the background so the mesh has to carry the appearance itself. Returns the number removed."""
+        if self._vertex_is_mesh is None or dist <= 0:
+            return 0
+        F = self._triangle_indices.long()
+        is_mesh = self._vertex_is_mesh[F[:, 0]]
+        free = torch.nonzero(~is_mesh, as_tuple=True)[0]
+        if free.numel() == 0:
+            return 0
+        V = self.vertices.detach()
+        # mesh surface samples: vertices and face centroids (spacing about one edge, finer than dist)
+        mesh_pts = torch.cat([V[self._vertex_is_mesh], V[F[is_mesh]].mean(1)], dim=0)
+        lo = mesh_pts.min(0).values - 2 * dist
+        def keys(p):
+            c = torch.floor((p - lo) / dist).long()
+            return (c[:, 0] * 2097152 + c[:, 1]) * 2097152 + c[:, 2]  # 21 bits per axis
+        occupied = torch.unique(keys(mesh_pts))
+        cen = V[F[free]].mean(1)
+        near = torch.zeros(free.numel(), dtype=torch.bool, device=V.device)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    k = keys(cen + torch.tensor([dx, dy, dz], device=V.device, dtype=V.dtype) * dist)
+                    pos = torch.searchsorted(occupied, k).clamp(max=occupied.numel() - 1)
+                    near |= occupied[pos] == k
+        if not near.any():
+            return 0
+        keep = torch.ones(F.shape[0], dtype=torch.bool, device=V.device)
+        keep[free[near]] = False
+        self.prune_triangles(keep)
+        used = torch.zeros(V.shape[0], dtype=torch.bool, device=V.device)
+        used[self._triangle_indices.flatten().long()] = True
+        self._prune_vertices(used | self._vertex_is_mesh)
+        return int(near.sum().item())
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
