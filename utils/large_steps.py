@@ -11,9 +11,9 @@
 # by one, so local folds and self-intersections cannot form.
 #
 # The systems are solved with Jacobi-preconditioned conjugate gradients on the
-# GPU, warm-started from the previous solution. The mesh topology must stay
-# fixed (--no_mesh_densify) and the mesh vertices must be the first
-# num_vertices vertices of the model.
+# GPU, warm-started from the previous solution. The operator is built for one
+# mesh topology: rebuild it after the mesh is refined. The mesh vertices are
+# addressed by their indices in the model (idx), in that order.
 #
 
 import torch
@@ -69,13 +69,17 @@ class LargeSteps:
         return x, (r.norm() / bnorm).item()
 
     @torch.no_grad()
-    def step(self, vertices, lr):
-        """Update the first num_vertices rows of vertices (an nn.Parameter with .grad) and zero their gradient."""
+    def step(self, vertices, lr, idx=None):
+        """Update the mesh rows idx (default: the first num_vertices) of vertices (an nn.Parameter with .grad)
+        and zero their gradient."""
         n = self.num_vertices
+        if idx is None:
+            idx = torch.arange(n, device=vertices.device)
+        assert idx.numel() == n
         if vertices.grad is None:
             # densification/pruning replaced the parameter after backward: no gradient this step
             return float("nan")
-        grad = vertices.grad[:n]
+        grad = vertices.grad[idx]
         self.g_u, _ = self.solve(grad, self.g_u, self.cg_iters)
         self.step_count += 1
         self.m1.mul_(self.b1).add_(self.g_u, alpha=1 - self.b1)
@@ -84,6 +88,6 @@ class LargeSteps:
         m2 = self.m2 / (1 - self.b2 ** self.step_count)
         self.u -= lr * m1 / (self.eps + m2.sqrt().max())
         self.x, residual = self.solve(self.u, self.x, self.x_iters)
-        vertices.data[:n] = self.x
-        vertices.grad[:n] = 0  # the regular optimizer must not move them too
+        vertices.data[idx] = self.x
+        vertices.grad[idx] = 0  # the regular optimizer must not move them too
         return residual

@@ -107,15 +107,26 @@ def training(
     if (opt.normal_only_motion or opt.lambda_tangential_laplacian > 0) and triangles._anchor is None:
         raise ValueError("--normal_only_motion and --lambda_tangential_laplacian need --mesh_path")
 
-    large_steps = None
+    if (opt.large_steps or opt.mesh_refine) and (triangles._anchor is None or not opt.no_mesh_densify):
+        raise ValueError("--large_steps and --mesh_refine need --mesh_path and --no_mesh_densify (the mesh only changes through --mesh_refine)")
+
+    def mesh_vertex_index():
+        if triangles._vertex_is_mesh is None:
+            return torch.arange(triangles.vertices.shape[0], device="cuda")
+        return torch.nonzero(triangles._vertex_is_mesh, as_tuple=True)[0]
+
+    def build_large_steps():
+        # operator for the current mesh topology, faces in mesh-local vertex numbering
+        idx = mesh_vertex_index()
+        local = torch.full((triangles.vertices.shape[0],), -1, dtype=torch.long, device="cuda")
+        local[idx] = torch.arange(idx.numel(), device="cuda")
+        faces = local[triangles._triangle_indices[triangles.triangle_is_mesh()].long()]
+        return LargeSteps(triangles.vertices.detach()[idx], faces, opt.ls_lambda, cg_iters=opt.ls_cg_iters), idx
+
+    large_steps, mesh_idx = None, None
     if opt.large_steps:
-        if triangles._anchor is None or not opt.no_mesh_densify:
-            raise ValueError("--large_steps needs --mesh_path and --no_mesh_densify (fixed mesh topology)")
-        num_mesh = triangles.vertices.shape[0] if triangles._vertex_is_mesh is None else int(triangles._vertex_is_mesh.sum().item())
-        assert triangles._vertex_is_mesh is None or bool(triangles._vertex_is_mesh[:num_mesh].all()), "mesh vertices must come first"
-        large_steps = LargeSteps(triangles.vertices.detach()[:num_mesh], triangles._triangle_indices[triangles.triangle_is_mesh()],
-                                 opt.ls_lambda, cg_iters=opt.ls_cg_iters)
-        print("Large steps on {} mesh vertices, lambda {}".format(num_mesh, opt.ls_lambda))
+        large_steps, mesh_idx = build_large_steps()
+        print("Large steps on {} mesh vertices, lambda {}".format(mesh_idx.numel(), opt.ls_lambda))
     ls_residual = float("nan")
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
@@ -214,6 +225,8 @@ def training(
         loss = loss_image + loss_weight + normal_loss + reg_loss  # + depth_loss
 
         loss.backward()
+        if opt.mesh_refine and iteration < opt.refine_until:
+            triangles.accumulate_color_grad()
         iter_end.record()
         
         with torch.no_grad():
@@ -300,6 +313,15 @@ def training(
                     triangles.add_new_gs(iteration, cap_max=opt.max_points, splitt_large_triangles=splitt_large_triangles, probs_opacity=probs_opacity)
    
 
+                if (opt.mesh_refine and opt.refine_from <= iteration <= opt.refine_until
+                        and iteration % opt.refine_interval == 0):
+                    added = triangles.refine_mesh(opt.refine_fraction, opt.refine_min_edge * triangles.init_edge, opt.mesh_max_vertices)
+                    num_mesh_v = int(mesh_vertex_index().numel())
+                    print("[ITER {}] mesh refinement: {} new vertices, mesh now {} vertices / {} faces".format(
+                        iteration, added, num_mesh_v, int(triangles.triangle_is_mesh().sum().item())))
+                    if added and large_steps is not None:
+                        large_steps, mesh_idx = build_large_steps()
+
                 if opt.free_exclusion > 0 and triangles._vertex_is_mesh is not None:
                     removed = triangles.remove_free_near_mesh(opt.free_exclusion * triangles.init_edge)
                     if iteration % 1000 == 0:
@@ -324,7 +346,9 @@ def training(
             if iteration < opt.iterations:
                 if large_steps is not None:
                     vertex_lr = next(g["lr"] for g in triangles.optimizer.param_groups if g["name"] == "vertices")
-                    residual = large_steps.step(triangles.vertices, vertex_lr * opt.ls_lr_mult)
+                    if mesh_idx.numel() != large_steps.num_vertices or (iteration % 500 == 0):
+                        mesh_idx = mesh_vertex_index()  # free-group pruning renumbers vertices
+                    residual = large_steps.step(triangles.vertices, vertex_lr * opt.ls_lr_mult, mesh_idx)
                     if residual == residual:  # nan when this step had no gradient (densification step)
                         ls_residual = residual
                     if iteration % 1000 == 0:

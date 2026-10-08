@@ -145,6 +145,13 @@ class OptimizationParams(ParamGroup):
         self.ls_lr_mult = 1.0 # mesh-vertex learning rate for large steps, as a multiple of the vertex lr schedule
         self.ls_cg_iters = 10 # conjugate-gradient iterations for the gradient solve (positions use 5, warm-started)
         self.free_exclusion = 0.0 # with --free_triangles: every 500 iterations delete free triangles within about this many init mean edges of the mesh (0 = off)
+        self.mesh_refine = False # conforming longest-edge refinement of the mesh where color gradients are high (needs --no_mesh_densify)
+        self.refine_from = 2000
+        self.refine_until = 15000
+        self.refine_interval = 1000 # multiple of 500
+        self.refine_fraction = 0.05 # share of mesh triangles selected per refinement step
+        self.refine_min_edge = 0.3 # do not split triangles whose longest edge is below this many init mean edges
+        self.mesh_max_vertices = 4000000
         self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)
 
         self.sigma_start = 0

@@ -864,6 +864,106 @@ class TriangleModel:
             self.vertex_weight.data.copy_(self.inverse_opacity(y, self.vertex_floor()))
 
 
+    # Child triangles for a triangle (v0,v1,v2) with edges e0=(v0,v1), e1=(v1,v2), e2=(v2,v0) and edge
+    # midpoints m0,m1,m2, per pattern s0 + 2*s1 + 4*s2 of split edges; slots 0..5 = v0,v1,v2,m0,m1,m2.
+    # Every child keeps the parent's winding.
+    _REFINE_TEMPLATES = {
+        1: [(0, 3, 2), (3, 1, 2)],
+        2: [(0, 1, 4), (0, 4, 2)],
+        4: [(0, 1, 5), (5, 1, 2)],
+        3: [(3, 1, 4), (0, 3, 4), (0, 4, 2)],
+        6: [(5, 4, 2), (0, 1, 4), (0, 4, 5)],
+        5: [(0, 3, 5), (3, 1, 2), (3, 2, 5)],
+        7: [(0, 3, 5), (3, 1, 4), (5, 4, 2), (3, 4, 5)],
+    }
+
+    def accumulate_color_grad(self):
+        """Add this step's per-vertex color-gradient norm (the refinement score) to a running sum."""
+        g = self._features_dc.grad
+        if g is None:
+            return
+        n = g.shape[0]
+        if getattr(self, "_color_grad", None) is None or self._color_grad.shape[0] != n:
+            self._color_grad = torch.zeros(n, device=g.device)
+            self._color_grad_count = torch.zeros(n, device=g.device)
+        norm = g.detach().reshape(n, -1).norm(dim=1)
+        self._color_grad += norm
+        self._color_grad_count += (norm > 0).float()
+
+    @torch.no_grad()
+    def refine_mesh(self, fraction, min_edge, max_vertices):
+        """Conforming refinement of the mesh group: pick the `fraction` of mesh triangles with the highest
+        mean color gradient of their vertices (longest edge above min_edge), split their longest edge at its
+        midpoint and re-triangulate every triangle touching a split edge (neighbours included), so no
+        T-junctions form. Returns the number of new vertices."""
+        if getattr(self, "_color_grad", None) is None or self._color_grad.shape[0] != self.vertices.shape[0]:
+            return 0
+        F = self._triangle_indices.long()
+        V = self.vertices.detach()
+        T = F.shape[0]
+        is_mesh_tri = self.triangle_is_mesh()
+        num_mesh_vertices = V.shape[0] if self._vertex_is_mesh is None else int(self._vertex_is_mesh.sum().item())
+        budget = max_vertices - num_mesh_vertices
+        if budget <= 0:
+            return 0
+
+        # score: mean over the triangle's vertices of the average color-gradient norm per step seen
+        vertex_score = self._color_grad / self._color_grad_count.clamp(min=1)
+        score = vertex_score[F].mean(1)
+        tri = V[F]
+        edge_len = torch.stack([(tri[:, 1] - tri[:, 0]).norm(dim=1), (tri[:, 2] - tri[:, 1]).norm(dim=1), (tri[:, 0] - tri[:, 2]).norm(dim=1)], 1)
+        longest = edge_len.argmax(1)
+        eligible = is_mesh_tri & (edge_len.max(1).values > min_edge) & (score > 0)
+        k = min(int(fraction * int(is_mesh_tri.sum().item())), int(eligible.sum().item()), budget)
+        if k <= 0:
+            return 0
+        selected = torch.topk(torch.where(eligible, score, torch.full_like(score, -1.0)), k).indices
+
+        # unique edges; each triangle's three edge ids
+        ends = torch.stack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)  # [T,3,2]
+        edges, edge_id = torch.unique(torch.sort(ends.reshape(-1, 2), dim=1).values, dim=0, return_inverse=True)
+        edge_id = edge_id.reshape(T, 3)
+        split = torch.zeros(edges.shape[0], dtype=torch.bool, device=V.device)
+        split[edge_id[selected, longest[selected]]] = True
+        split_ids = torch.nonzero(split, as_tuple=True)[0]
+        midpoint = torch.full((edges.shape[0],), -1, dtype=torch.long, device=V.device)
+        midpoint[split_ids] = V.shape[0] + torch.arange(split_ids.numel(), device=V.device)
+
+        # new vertices: averages of the edge's endpoints
+        u, w = edges[split_ids, 0], edges[split_ids, 1]
+        new_vertices = (V[u] + V[w]) / 2.0
+        new_features_dc = (self._features_dc[u] + self._features_dc[w]) / 2.0
+        new_features_rest = (self._features_rest[u] + self._features_rest[w]) / 2.0
+        weights = self.get_vertex_weight
+        new_vertex_weight = self.inverse_opacity((weights[u] + weights[w]) / 2.0, self.vertex_floor(u))
+        new_anchor = new_anchor_normal = None
+        if self._anchor is not None:
+            new_anchor = (self._anchor[u] + self._anchor[w]) / 2.0
+            n = self._anchor_normal[u] + self._anchor_normal[w]
+            new_anchor_normal = torch.nn.functional.normalize(torch.where(n.norm(dim=1, keepdim=True) > 1e-6, n, self._anchor_normal[u]), dim=1)
+        if self._vertex_is_mesh is not None:
+            self._new_vertex_is_mesh = torch.ones(split_ids.numel(), dtype=torch.bool, device=V.device)
+
+        # children of every triangle touching a split edge
+        s = split[edge_id]  # [T,3]
+        pattern = s[:, 0].long() + 2 * s[:, 1].long() + 4 * s[:, 2].long()
+        affected = torch.nonzero(pattern > 0, as_tuple=True)[0]
+        slots = torch.cat([F, midpoint[edge_id]], 1)  # [T,6]: v0,v1,v2,m0,m1,m2
+        children = []
+        for code, template in self._REFINE_TEMPLATES.items():
+            idx = torch.nonzero(pattern == code, as_tuple=True)[0]
+            if idx.numel():
+                t = torch.tensor(template, device=V.device)
+                children.append(slots[idx][:, t].reshape(-1, 3))
+        children = torch.cat(children, 0).to(torch.int32)
+
+        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, children, new_anchor, new_anchor_normal)
+        keep = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool, device=V.device)
+        keep[affected] = False  # the parents (children were appended after them)
+        self.prune_triangles(keep)
+        self._color_grad = None
+        return int(split_ids.numel())
+
     def triangle_areas(self):
         tri = self.vertices[self._triangle_indices]                    # [T, 3, 3]
         AB  = tri[:, 1] - tri[:, 0]                                    # [T, 3]
