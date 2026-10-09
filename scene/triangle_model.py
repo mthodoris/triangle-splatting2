@@ -891,7 +891,31 @@ class TriangleModel:
         self._color_grad_count += (norm > 0).float()
 
     @torch.no_grad()
-    def refine_mesh(self, fraction, min_edge, max_vertices):
+    def accumulate_inradius(self, camera, radii, render_scaling):
+        """Keep, per triangle, the largest on-screen inradius (in render pixels) over the views it was drawn in.
+        The rasterizer skips triangles whose inradius is below 1 render pixel, so refinement uses this to only
+        split triangles whose children will still be drawn."""
+        T = self._triangle_indices.shape[0]
+        if getattr(self, "_max_inradius", None) is None or self._max_inradius.shape[0] != T:
+            self._max_inradius = torch.zeros(T, device="cuda")
+        vis = torch.nonzero(radii > 0, as_tuple=True)[0]
+        if vis.numel() == 0:
+            return
+        F = self._triangle_indices[vis].long()
+        V = self.vertices.detach()
+        p = torch.cat([V, torch.ones_like(V[:, :1])], 1) @ camera.full_proj_transform  # row-vector convention
+        w = p[:, 3:4].clamp(min=1e-6)
+        W, H = camera.image_width * render_scaling, camera.image_height * render_scaling
+        xy = torch.stack([((p[:, 0:1] / w) + 1) * W * 0.5, ((p[:, 1:2] / w) + 1) * H * 0.5], -1).squeeze(1)
+        t = xy[F]  # [n,3,2]
+        e = torch.stack([(t[:, 1] - t[:, 0]).norm(dim=1), (t[:, 2] - t[:, 1]).norm(dim=1), (t[:, 0] - t[:, 2]).norm(dim=1)], 1)
+        d1, d2 = t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]
+        area = 0.5 * (d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]).abs()
+        inr = 2 * area / e.sum(1).clamp(min=1e-9)
+        self._max_inradius[vis] = torch.maximum(self._max_inradius[vis], inr)
+
+    @torch.no_grad()
+    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0):
         """Conforming refinement of the mesh group: pick the `fraction` of mesh triangles with the highest
         mean color gradient of their vertices (longest edge above min_edge), split their longest edge at its
         midpoint and re-triangulate every triangle touching a split edge (neighbours included), so no
@@ -914,6 +938,12 @@ class TriangleModel:
         edge_len = torch.stack([(tri[:, 1] - tri[:, 0]).norm(dim=1), (tri[:, 2] - tri[:, 1]).norm(dim=1), (tri[:, 0] - tri[:, 2]).norm(dim=1)], 1)
         longest = edge_len.argmax(1)
         eligible = is_mesh_tri & (edge_len.max(1).values > min_edge) & (score > 0)
+        if min_inradius > 0:
+            # only triangles big enough on screen that their children (about half the inradius) are still drawn
+            inr = getattr(self, "_max_inradius", None)
+            if inr is None or inr.shape[0] != T:
+                return 0
+            eligible &= inr >= min_inradius
         k = min(int(fraction * int(is_mesh_tri.sum().item())), int(eligible.sum().item()), budget)
         if k <= 0:
             return 0
@@ -962,6 +992,7 @@ class TriangleModel:
         keep[affected] = False  # the parents (children were appended after them)
         self.prune_triangles(keep)
         self._color_grad = None
+        self._max_inradius = None
         return int(split_ids.numel())
 
     def triangle_areas(self):

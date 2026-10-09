@@ -152,6 +152,7 @@ class OptimizationParams(ParamGroup):
         self.refine_fraction = 0.05 # share of mesh triangles selected per refinement step
         self.refine_min_edge = 0.3 # do not split triangles whose longest edge is below this many init mean edges
         self.mesh_max_vertices = 4000000
+        self.refine_min_inradius = 0.0 # only split triangles whose largest on-screen inradius (render pixels) reaches this; the rasterizer skips triangles under 1 (0 = off)
         self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)
 
         self.sigma_start = 0
