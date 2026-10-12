@@ -93,6 +93,7 @@ class TriangleModel:
         self.tex_res = 0
         self._face_tex = torch.empty(0)
         self.free_behind = False # --free_behind: render the free group strictly behind the mesh group
+        self.free_sigma = None # --free_sigma_init: the free group's own sigma (with --free_behind); None = shared sigma
 
         self.scaling = 1
 
@@ -117,6 +118,8 @@ class TriangleModel:
             point_cloud_state_dict["face_tex"] = self._face_tex
             point_cloud_state_dict["tex_res"] = self.tex_res
         point_cloud_state_dict["free_behind"] = self.free_behind
+        if self.free_sigma is not None:
+            point_cloud_state_dict["free_sigma"] = self.free_sigma
         point_cloud_state_dict["opacity_floor"] = self.opacity_floor
         if self._vertex_is_mesh is not None:
             point_cloud_state_dict["vertex_is_mesh"] = self._vertex_is_mesh
@@ -143,6 +146,7 @@ class TriangleModel:
             self.tex_res = int(state["tex_res"])
             self._face_tex = state["face_tex"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
         self.free_behind = bool(state.get("free_behind", False))
+        self.free_sigma = state.get("free_sigma", None)
 
 
         # For object extraction

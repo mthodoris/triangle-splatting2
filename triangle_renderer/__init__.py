@@ -98,7 +98,7 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
 
     # Rasterize visible triangles to image, obtain their radii (on screen). 
-    def rasterize(face_mask=None, rasterizer=rasterizer):
+    def rasterize(face_mask=None, rasterizer=rasterizer, sigma=sigma):
         tri_idx = triangles_indices if face_mask is None else triangles_indices[face_mask]
         tex = {}
         if use_tex:
@@ -123,7 +123,8 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         mesh_rasterizer = (TexRasterizer if use_tex else TriangleRasterizer)(
             raster_settings=raster_settings._replace(bg=torch.zeros_like(bg_color)))
         mesh_image, radii_m, scaling_m, allmap, max_blending_m = rasterize(is_mesh, mesh_rasterizer)
-        free_image, radii_f, scaling_f, _, max_blending_f = rasterize(~is_mesh)
+        free_sigma = sigma if pc.free_sigma is None else pc.free_sigma
+        free_image, radii_f, scaling_f, _, max_blending_f = rasterize(~is_mesh, sigma=free_sigma)
         rendered_image = mesh_image + (1 - allmap[1:2].detach()) * free_image
         radii = torch.zeros(is_mesh.shape[0], dtype=radii_m.dtype, device=radii_m.device)
         radii[is_mesh], radii[~is_mesh] = radii_m, radii_f

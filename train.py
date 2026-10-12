@@ -68,6 +68,8 @@ def training(
         print("Per-face texture: level {}, {} samples per face, {} faces".format(opt.tex_res, triangles._face_tex.shape[1], triangles._face_tex.shape[0]))
     triangles.add_percentage = opt.add_percentage
     triangles.free_behind = opt.free_behind
+    if opt.mesh_floor_from_start:
+        triangles.update_min_weight(opt.final_opacity)  # free-group floor unchanged
 
 
     if checkpoint:
@@ -165,6 +167,9 @@ def training(
             current_sigma = initial_sigma - (initial_sigma - final_sigma) * progress
 
         triangles.set_sigma(current_sigma)
+        if opt.free_sigma_init > 0:
+            triangles.free_sigma = opt.free_sigma_init if iteration < sigma_start else \
+                opt.free_sigma_init - (opt.free_sigma_init - final_sigma) * min((iteration - sigma_start) / (total_iters - sigma_start), 1.0)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -359,7 +364,7 @@ def training(
                     current_opacity = init_opacity + (final_opacity - init_opacity) * a
                     current_opacity = min(current_opacity, final_opacity)
                     current_free = min(init_opacity + (opt.free_final_opacity - init_opacity) * a, opt.free_final_opacity)
-                    triangles.update_min_weight(current_opacity, new_free_min_weight=current_free)
+                    triangles.update_min_weight(final_opacity if opt.mesh_floor_from_start else current_opacity, new_free_min_weight=current_free)
 
                     prune_triangles += 0.01 
 
