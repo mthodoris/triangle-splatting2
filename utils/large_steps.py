@@ -26,6 +26,7 @@ class LargeSteps:
         e = torch.cat([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]], 0)
         e = torch.unique(torch.sort(e, dim=1).values, dim=0)
         self.i, self.j = e[:, 0], e[:, 1]
+        self.faces = f
         self.num_vertices = vertices.shape[0]
         ones = torch.ones(self.i.shape[0], device=vertices.device)
         self.deg = torch.zeros(self.num_vertices, device=vertices.device).index_add_(0, self.i, ones).index_add_(0, self.j, ones)[:, None]
@@ -43,6 +44,15 @@ class LargeSteps:
         self.m1 = torch.zeros_like(x)
         self.m2 = torch.zeros_like(x)
         self.step_count = 0
+
+    def vertex_normals(self, x):
+        """Area-weighted unit vertex normals of the mesh at positions x."""
+        t = x[self.faces]
+        fn = torch.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0], dim=1)  # length = 2 * area
+        n = torch.zeros_like(x)
+        for k in range(3):
+            n.index_add_(0, self.faces[:, k], fn)
+        return torch.nn.functional.normalize(n, dim=1)
 
     def matvec(self, x):
         """(I + lambda L) x with L = D - A."""
@@ -69,9 +79,10 @@ class LargeSteps:
         return x, (r.norm() / bnorm).item()
 
     @torch.no_grad()
-    def step(self, vertices, lr, idx=None):
+    def step(self, vertices, lr, idx=None, normal_only=False):
         """Update the mesh rows idx (default: the first num_vertices) of vertices (an nn.Parameter with .grad)
-        and zero their gradient."""
+        and zero their gradient. normal_only: keep only the part of each vertex's move along its current
+        normal (no sliding along the surface), and re-sync u to the projected positions."""
         n = self.num_vertices
         if idx is None:
             idx = torch.arange(n, device=vertices.device)
@@ -87,7 +98,13 @@ class LargeSteps:
         m1 = self.m1 / (1 - self.b1 ** self.step_count)
         m2 = self.m2 / (1 - self.b2 ** self.step_count)
         self.u -= lr * m1 / (self.eps + m2.sqrt().max())
+        x_old = self.x
         self.x, residual = self.solve(self.u, self.x, self.x_iters)
+        if normal_only:
+            n = self.vertex_normals(x_old)
+            d = self.x - x_old
+            self.x = x_old + (d * n).sum(1, keepdim=True) * n
+            self.u = self.matvec(self.x)
         vertices.data[idx] = self.x
         vertices.grad[idx] = 0  # the regular optimizer must not move them too
         return residual

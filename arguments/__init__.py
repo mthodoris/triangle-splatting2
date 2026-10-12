@@ -143,6 +143,9 @@ class OptimizationParams(ParamGroup):
         self.large_steps = False # smooth mesh-vertex updates, Nicolet et al. 2021 (needs --no_mesh_densify)
         self.ls_lambda = 20.0 # smoothing strength: x = (I + lambda L)^-1 u
         self.ls_lr_mult = 1.0 # mesh-vertex learning rate for large steps, as a multiple of the vertex lr schedule
+        self.ls_normal_only = False # large steps: move mesh vertices only along their normal (no sliding along the surface)
+        self.ls_lambda_final = 0.0 # >0: lambda decreases log-linearly from --ls_lambda to this by --ls_lambda_until
+        self.ls_lambda_until = 15000
         self.ls_cg_iters = 10 # conjugate-gradient iterations for the gradient solve (positions use 5, warm-started)
         self.free_exclusion = 0.0 # with --free_triangles: every 500 iterations delete free triangles within about this many init mean edges of the mesh (0 = off)
         self.mesh_refine = False # conforming longest-edge refinement of the mesh where color gradients are high (needs --no_mesh_densify)

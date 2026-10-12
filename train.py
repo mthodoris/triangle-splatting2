@@ -115,13 +115,20 @@ def training(
             return torch.arange(triangles.vertices.shape[0], device="cuda")
         return torch.nonzero(triangles._vertex_is_mesh, as_tuple=True)[0]
 
-    def build_large_steps():
+    def ls_lambda_at(it):
+        # log-linear from --ls_lambda to --ls_lambda_final until --ls_lambda_until (off when final <= 0)
+        if opt.ls_lambda_final <= 0:
+            return opt.ls_lambda
+        a = min(1.0, max(0.0, it / max(1, opt.ls_lambda_until)))
+        return float(opt.ls_lambda * (opt.ls_lambda_final / opt.ls_lambda) ** a)
+
+    def build_large_steps(lam=None):
         # operator for the current mesh topology, faces in mesh-local vertex numbering
         idx = mesh_vertex_index()
         local = torch.full((triangles.vertices.shape[0],), -1, dtype=torch.long, device="cuda")
         local[idx] = torch.arange(idx.numel(), device="cuda")
         faces = local[triangles._triangle_indices[triangles.triangle_is_mesh()].long()]
-        return LargeSteps(triangles.vertices.detach()[idx], faces, opt.ls_lambda, cg_iters=opt.ls_cg_iters), idx
+        return LargeSteps(triangles.vertices.detach()[idx], faces, opt.ls_lambda if lam is None else lam, cg_iters=opt.ls_cg_iters), idx
 
     large_steps, mesh_idx = None, None
     if opt.large_steps:
@@ -323,7 +330,13 @@ def training(
                     print("[ITER {}] mesh refinement: {} new vertices, mesh now {} vertices / {} faces".format(
                         iteration, added, num_mesh_v, int(triangles.triangle_is_mesh().sum().item())))
                     if added and large_steps is not None:
-                        large_steps, mesh_idx = build_large_steps()
+                        large_steps, mesh_idx = build_large_steps(ls_lambda_at(iteration))
+
+                if large_steps is not None and opt.ls_lambda_final > 0 and iteration % 1000 == 0 and iteration <= opt.ls_lambda_until:
+                    lam = ls_lambda_at(iteration)
+                    if abs(lam - large_steps.lam) > 1e-6:
+                        large_steps, mesh_idx = build_large_steps(lam)
+                        print("[ITER {}] large steps lambda -> {:.2f}".format(iteration, lam))
 
                 if opt.free_exclusion > 0 and triangles._vertex_is_mesh is not None:
                     removed = triangles.remove_free_near_mesh(opt.free_exclusion * triangles.init_edge)
@@ -351,7 +364,7 @@ def training(
                     vertex_lr = next(g["lr"] for g in triangles.optimizer.param_groups if g["name"] == "vertices")
                     if mesh_idx.numel() != large_steps.num_vertices or (iteration % 500 == 0):
                         mesh_idx = mesh_vertex_index()  # free-group pruning renumbers vertices
-                    residual = large_steps.step(triangles.vertices, vertex_lr * opt.ls_lr_mult, mesh_idx)
+                    residual = large_steps.step(triangles.vertices, vertex_lr * opt.ls_lr_mult, mesh_idx, opt.ls_normal_only)
                     if residual == residual:  # nan when this step had no gradient (densification step)
                         ls_residual = residual
                     if iteration % 1000 == 0:
