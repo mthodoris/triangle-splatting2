@@ -98,17 +98,43 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
 
     # Rasterize visible triangles to image, obtain their radii (on screen). 
-    rendered_image, radii, scaling, allmap, max_blending  = rasterizer(
-        vertices=vertices,
-        triangles_indices=triangles_indices,
-        vertex_weights=vertex_weights.squeeze(),
-        sigma=sigma,
-        shs = shs,
-        colors_precomp = colors_precomp,
-        scaling = scaling,
-        **({"face_tex": pc._face_tex, "tex_res": pc.tex_res} if use_tex else {})
-       )
-       
+    def rasterize(face_mask=None, rasterizer=rasterizer):
+        tri_idx = triangles_indices if face_mask is None else triangles_indices[face_mask]
+        tex = {}
+        if use_tex:
+            tex = {"face_tex": pc._face_tex if face_mask is None else pc._face_tex[face_mask], "tex_res": pc.tex_res}
+        return rasterizer(
+            vertices=vertices,
+            triangles_indices=tri_idx,
+            vertex_weights=vertex_weights.squeeze(),
+            sigma=sigma,
+            shs = shs,
+            colors_precomp = colors_precomp,
+            scaling = scaling if face_mask is None else scaling[face_mask],
+            **tex
+           )
+
+    mesh_image = None
+    if getattr(pc, "free_behind", False) and pc._vertex_is_mesh is not None:
+        # --free_behind: the free group is composited strictly behind the mesh group,
+        # image = mesh (over black) + (1 - mesh alpha) * free (over bg), with the mesh alpha detached.
+        # Free triangles get no gradient where the mesh is opaque, so they can only fill what the mesh leaves empty.
+        is_mesh = pc.triangle_is_mesh()
+        mesh_rasterizer = (TexRasterizer if use_tex else TriangleRasterizer)(
+            raster_settings=raster_settings._replace(bg=torch.zeros_like(bg_color)))
+        mesh_image, radii_m, scaling_m, allmap, max_blending_m = rasterize(is_mesh, mesh_rasterizer)
+        free_image, radii_f, scaling_f, _, max_blending_f = rasterize(~is_mesh)
+        rendered_image = mesh_image + (1 - allmap[1:2].detach()) * free_image
+        radii = torch.zeros(is_mesh.shape[0], dtype=radii_m.dtype, device=radii_m.device)
+        radii[is_mesh], radii[~is_mesh] = radii_m, radii_f
+        scaling = torch.zeros(is_mesh.shape[0], dtype=scaling_m.dtype, device=scaling_m.device)
+        scaling[is_mesh], scaling[~is_mesh] = scaling_m, scaling_f
+        max_blending = torch.zeros(is_mesh.shape[0], dtype=max_blending_m.dtype, device=max_blending_m.device)
+        max_blending[is_mesh], max_blending[~is_mesh] = max_blending_m, max_blending_f
+        mesh_image = F.interpolate(mesh_image.unsqueeze(0), size=(H_init, W_init), mode="area").squeeze(0)
+    else:
+        rendered_image, radii, scaling, allmap, max_blending = rasterize()
+
     img_hr = rendered_image.unsqueeze(0)  # -> [1, 3, H, W]
     img_ds_area = F.interpolate(img_hr, size=(H_init, W_init), mode="area")  # [1, 3, H0, W0]
     rendered_image = img_ds_area.squeeze(0)
@@ -120,6 +146,8 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
             "scaling": scaling,
             "max_blending": max_blending,
             }
+    if mesh_image is not None:
+        rets["mesh_render"] = mesh_image  # mesh group alone (black where it is empty), --free_behind only
 
     # additional regularizations
     render_alpha = allmap[1:2]

@@ -67,6 +67,7 @@ def training(
         triangles.init_texture(opt.tex_res, opt.tex_lr)
         print("Per-face texture: level {}, {} samples per face, {} faces".format(opt.tex_res, triangles._face_tex.shape[1], triangles._face_tex.shape[0]))
     triangles.add_percentage = opt.add_percentage
+    triangles.free_behind = opt.free_behind
 
 
     if checkpoint:
@@ -472,11 +473,13 @@ def training_report(tb_writer, logger, iteration, pixel_loss, loss, loss_fn, ela
                 ssim_test = 0.0
                 lpips_test = 0.0
                 total_time = 0.0
+                mesh_psnr, mesh_psnr_cov, mesh_cov = 0.0, 0.0, 0.0  # --free_behind: mesh group alone
                 for idx, viewpoint in enumerate(config['cameras']):
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
                     start_event.record()
-                    image = torch.clamp(renderFunc(viewpoint, scene.triangles, *renderArgs)["render"], 0.0, 1.0)
+                    out = renderFunc(viewpoint, scene.triangles, *renderArgs)
+                    image = torch.clamp(out["render"], 0.0, 1.0)
                     end_event.record()
                     torch.cuda.synchronize()
                     runtime = start_event.elapsed_time(end_event)
@@ -491,6 +494,13 @@ def training_report(tb_writer, logger, iteration, pixel_loss, loss, loss_fn, ela
                     psnr_test += psnr(image, gt_image).mean().double()
                     ssim_test += ssim(image, gt_image).mean().double()
                     lpips_test += lpips_fn(image, gt_image).mean().double()
+                    if "mesh_render" in out:
+                        mesh_img = torch.clamp(out["mesh_render"], 0.0, 1.0)
+                        covered = (out["rend_alpha"][0] >= 0.5)
+                        mesh_psnr += psnr(mesh_img, gt_image).mean().double()
+                        mse_cov = ((mesh_img - gt_image) ** 2).mean(0)[covered].mean().double()
+                        mesh_psnr_cov += -10 * torch.log10(mse_cov)
+                        mesh_cov += covered.float().mean().double()
                 psnr_test /= len(config['cameras'])
                 pixel_loss_test /= len(config['cameras'])       
                 ssim_test /= len(config['cameras'])
@@ -499,6 +509,10 @@ def training_report(tb_writer, logger, iteration, pixel_loss, loss, loss_fn, ela
                 fps = 1000.0 / total_time
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {}".format(iteration, config['name'], pixel_loss_test, psnr_test, ssim_test, lpips_test))
                 logger.log_eval(iteration, config['name'], pixel_loss_test, psnr_test, ssim_test, lpips_test, fps)
+                if mesh_cov > 0:
+                    n_cam = len(config['cameras'])
+                    print("[ITER {}] {} mesh only: PSNR {:.3f}, PSNR on mesh-covered pixels {:.3f}, covered {:.1f}%".format(
+                        iteration, config['name'], mesh_psnr / n_cam, mesh_psnr_cov / n_cam, 100 * mesh_cov / n_cam))
 
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', pixel_loss_test, iteration)

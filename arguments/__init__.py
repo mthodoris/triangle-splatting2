@@ -147,6 +147,7 @@ class OptimizationParams(ParamGroup):
         self.ls_lambda_final = 0.0 # >0: lambda decreases log-linearly from --ls_lambda to this by --ls_lambda_until
         self.ls_lambda_until = 15000
         self.ls_cg_iters = 10 # conjugate-gradient iterations for the gradient solve (positions use 5, warm-started)
+        self.free_behind = False # with --free_triangles: composite the free group behind the mesh group (free triangles only fill pixels the mesh leaves empty)
         self.free_exclusion = 0.0 # with --free_triangles: every 500 iterations delete free triangles within about this many init mean edges of the mesh (0 = off)
         self.tex_res = 0 # per-face texture: level of the barycentric colour lattice in every triangle (0 = off; needs diff-triangle2-rasterization-tex)
         self.tex_lr = 0.0025 # learning rate of the per-face texture

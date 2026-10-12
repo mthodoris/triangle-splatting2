@@ -92,6 +92,7 @@ class TriangleModel:
         # every triangle, K = (n+1)(n+2)/2 samples per face, added to the vertex colours by the rasterizer.
         self.tex_res = 0
         self._face_tex = torch.empty(0)
+        self.free_behind = False # --free_behind: render the free group strictly behind the mesh group
 
         self.scaling = 1
 
@@ -115,6 +116,7 @@ class TriangleModel:
         if self.tex_res > 0:
             point_cloud_state_dict["face_tex"] = self._face_tex
             point_cloud_state_dict["tex_res"] = self.tex_res
+        point_cloud_state_dict["free_behind"] = self.free_behind
         point_cloud_state_dict["opacity_floor"] = self.opacity_floor
         if self._vertex_is_mesh is not None:
             point_cloud_state_dict["vertex_is_mesh"] = self._vertex_is_mesh
@@ -140,6 +142,7 @@ class TriangleModel:
         if state.get("tex_res", 0) > 0:
             self.tex_res = int(state["tex_res"])
             self._face_tex = state["face_tex"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
+        self.free_behind = bool(state.get("free_behind", False))
 
 
         # For object extraction
