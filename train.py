@@ -228,7 +228,7 @@ def training(
         if opt.mesh_refine and iteration < opt.refine_until:
             triangles.accumulate_color_grad()
             if opt.refine_min_inradius > 0:
-                triangles.accumulate_inradius(viewpoint_cam, render_pkg["radii"].detach(), triangles.scaling)
+                triangles.accumulate_inradius(viewpoint_cam, render_pkg["radii"].detach(), triangles.scaling, opt.refine_min_inradius)
         iter_end.record()
         
         with torch.no_grad():
@@ -318,7 +318,7 @@ def training(
                 if (opt.mesh_refine and opt.refine_from <= iteration <= opt.refine_until
                         and iteration % opt.refine_interval == 0):
                     added = triangles.refine_mesh(opt.refine_fraction, opt.refine_min_edge * triangles.init_edge, opt.mesh_max_vertices,
-                                                  opt.refine_min_inradius)
+                                                  opt.refine_min_inradius, opt.refine_view_fraction)
                     num_mesh_v = int(mesh_vertex_index().numel())
                     print("[ITER {}] mesh refinement: {} new vertices, mesh now {} vertices / {} faces".format(
                         iteration, added, num_mesh_v, int(triangles.triangle_is_mesh().sum().item())))

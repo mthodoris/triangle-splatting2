@@ -891,13 +891,15 @@ class TriangleModel:
         self._color_grad_count += (norm > 0).float()
 
     @torch.no_grad()
-    def accumulate_inradius(self, camera, radii, render_scaling):
+    def accumulate_inradius(self, camera, radii, render_scaling, min_inradius=0.0):
         """Keep, per triangle, the largest on-screen inradius (in render pixels) over the views it was drawn in.
         The rasterizer skips triangles whose inradius is below 1 render pixel, so refinement uses this to only
         split triangles whose children will still be drawn."""
         T = self._triangle_indices.shape[0]
         if getattr(self, "_max_inradius", None) is None or self._max_inradius.shape[0] != T:
             self._max_inradius = torch.zeros(T, device="cuda")
+            self._inr_views = torch.zeros(T, device="cuda")  # views the triangle was drawn in
+            self._inr_views_ok = torch.zeros(T, device="cuda")  # ... with inradius >= min_inradius
         vis = torch.nonzero(radii > 0, as_tuple=True)[0]
         if vis.numel() == 0:
             return
@@ -913,9 +915,11 @@ class TriangleModel:
         area = 0.5 * (d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]).abs()
         inr = 2 * area / e.sum(1).clamp(min=1e-9)
         self._max_inradius[vis] = torch.maximum(self._max_inradius[vis], inr)
+        self._inr_views[vis] += 1
+        self._inr_views_ok[vis] += (inr >= min_inradius).float()
 
     @torch.no_grad()
-    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0):
+    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0):
         """Conforming refinement of the mesh group: pick the `fraction` of mesh triangles with the highest
         mean color gradient of their vertices (longest edge above min_edge), split their longest edge at its
         midpoint and re-triangulate every triangle touching a split edge (neighbours included), so no
@@ -943,7 +947,12 @@ class TriangleModel:
             inr = getattr(self, "_max_inradius", None)
             if inr is None or inr.shape[0] != T:
                 return 0
-            eligible &= inr >= min_inradius
+            if view_fraction > 0:
+                # big enough in at least view_fraction of the views it was drawn in, not only its best view
+                eligible &= self._inr_views_ok >= view_fraction * self._inr_views.clamp(min=1)
+                eligible &= self._inr_views > 0
+            else:
+                eligible &= inr >= min_inradius
         k = min(int(fraction * int(is_mesh_tri.sum().item())), int(eligible.sum().item()), budget)
         if k <= 0:
             return 0
