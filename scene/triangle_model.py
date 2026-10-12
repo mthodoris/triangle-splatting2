@@ -696,6 +696,23 @@ class TriangleModel:
         return optimizable_tensors
     
 
+    # Refinement accumulators (per triangle: inradius stats, per vertex: color-gradient sums) follow every
+    # prune/append, so free-group pruning and densification do not reset them (--free_triangles with --mesh_refine).
+    _TRI_ACCUM = ("_max_inradius", "_inr_views", "_inr_views_ok")
+    _VERT_ACCUM = ("_color_grad", "_color_grad_count")
+
+    def _select_accum(self, names, sel, old_n):
+        for name in names:
+            t = getattr(self, name, None)
+            if t is not None and t.shape[0] == old_n:
+                setattr(self, name, t[sel])
+
+    def _grow_accum(self, names, old_n, extra):
+        for name in names:
+            t = getattr(self, name, None)
+            if t is not None and t.shape[0] == old_n:
+                setattr(self, name, torch.cat([t, torch.zeros(extra, dtype=t.dtype, device=t.device)]))
+
     def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor=None, new_anchor_normal=None, new_face_tex=None):
         # Create dictionary of new tensors to append
         d = {
@@ -705,6 +722,9 @@ class TriangleModel:
             "f_rest": new_features_rest,
         }
         
+        self._grow_accum(self._VERT_ACCUM, self.vertices.shape[0], new_vertices.shape[0])
+        self._grow_accum(self._TRI_ACCUM, self._triangle_indices.shape[0], new_triangles.shape[0])
+
         # Append new tensors to optimizer
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         
@@ -875,6 +895,9 @@ class TriangleModel:
             remapped = new_id[self._triangle_indices.long()]
             valid_tris = (remapped >= 0).all(dim=1)
             remapped = remapped[valid_tris]
+            self._select_accum(self._TRI_ACCUM, valid_tris, valid_tris.numel())
+            if self.tex_res > 0 and not valid_tris.all():
+                self._set_face_tex(self._face_tex.detach()[valid_tris], lambda t: t[valid_tris])
             self._triangle_indices = remapped.to(torch.int32).contiguous()
 
             if isinstance(self.image_size, torch.Tensor) and self.image_size.numel() > 0:
@@ -883,6 +906,7 @@ class TriangleModel:
                 self.importance_score = self.importance_score[valid_tris]
 
         # Prune vertex-related parameters using the initial mask
+        self._select_accum(self._VERT_ACCUM, vertex_mask, oldV)
         self._prune_vertex_optimizer(vertex_mask)
 
         # After initial pruning, check for unreferenced vertices
@@ -899,6 +923,7 @@ class TriangleModel:
             # Remove unreferenced vertices
             if not mask_referenced.all():
                 # Prune vertex parameters
+                self._select_accum(self._VERT_ACCUM, mask_referenced, current_vertex_count)
                 self._prune_vertex_optimizer(mask_referenced)
 
                 # Remap triangle indices if triangles exist
@@ -917,6 +942,7 @@ class TriangleModel:
         ##################################################################
         # REMOVE ALL TRIANLGES WITH MIN WEIGHT LESS THAN SOME THRESHOLD  #
         ##################################################################
+        self._select_accum(self._TRI_ACCUM, mask, self._triangle_indices.shape[0])
         self._triangle_indices = self._triangle_indices[mask]
         if self.tex_res > 0:
             self._set_face_tex(self._face_tex.detach()[mask], lambda t: t[mask])
