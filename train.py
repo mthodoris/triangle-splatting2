@@ -63,6 +63,9 @@ def training(
     print("Initial model: {} vertices, {} triangles ({})".format(
         init_num_vertices, init_num_triangles, dataset.mesh_path if dataset.mesh_path else "point cloud"))
     triangles.training_setup(opt, opt.feature_lr, opt.weight_lr, opt.lr_triangles_points_init)
+    if opt.tex_res > 0:
+        triangles.init_texture(opt.tex_res, opt.tex_lr)
+        print("Per-face texture: level {}, {} samples per face, {} faces".format(opt.tex_res, triangles._face_tex.shape[1], triangles._face_tex.shape[0]))
     triangles.add_percentage = opt.add_percentage
 
 
@@ -149,6 +152,10 @@ def training(
         iter_start.record()
 
         triangles.update_learning_rate(iteration)
+        if opt.tex_res > 0:
+            for g in triangles.optimizer.param_groups:
+                if g["name"] == "face_tex":
+                    g["lr"] = opt.tex_lr if iteration >= opt.tex_from else 0.0
         if iteration < sigma_start:
             current_sigma = initial_sigma
         else:

@@ -148,6 +148,9 @@ class OptimizationParams(ParamGroup):
         self.ls_lambda_until = 15000
         self.ls_cg_iters = 10 # conjugate-gradient iterations for the gradient solve (positions use 5, warm-started)
         self.free_exclusion = 0.0 # with --free_triangles: every 500 iterations delete free triangles within about this many init mean edges of the mesh (0 = off)
+        self.tex_res = 0 # per-face texture: level of the barycentric colour lattice in every triangle (0 = off; needs diff-triangle2-rasterization-tex)
+        self.tex_lr = 0.0025 # learning rate of the per-face texture
+        self.tex_from = 0 # iteration from which the texture trains
         self.mesh_refine = False # conforming longest-edge refinement of the mesh where color gradients are high (needs --no_mesh_densify)
         self.refine_from = 2000
         self.refine_until = 15000

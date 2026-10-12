@@ -21,6 +21,11 @@
 import torch
 import math
 from diff_triangle_rasterization import TriangleRasterizationSettings, TriangleRasterizer
+try:  # per-face texture rasterizer (submodules/diff-triangle2-rasterization-tex), only needed with --tex_res
+    from diff_triangle_rasterization_tex import TriangleRasterizationSettings as TexRasterizationSettings
+    from diff_triangle_rasterization_tex import TriangleRasterizer as TexRasterizer
+except ImportError:
+    TexRasterizer = None
 from scene.triangle_model import TriangleModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
@@ -53,7 +58,10 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
     H = upsample * H_init
     W = upsample * W_init
 
-    raster_settings = TriangleRasterizationSettings(
+    use_tex = getattr(pc, "tex_res", 0) > 0
+    if use_tex and TexRasterizer is None:
+        raise ImportError("this model has a per-face texture: install submodules/diff-triangle2-rasterization-tex")
+    raster_settings = (TexRasterizationSettings if use_tex else TriangleRasterizationSettings)(
         image_height=H,
         image_width=W,
         tanfovx=tanfovx,
@@ -68,7 +76,7 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         debug=pipe.debug
     )
 
-    rasterizer = TriangleRasterizer(raster_settings=raster_settings)
+    rasterizer = (TexRasterizer if use_tex else TriangleRasterizer)(raster_settings=raster_settings)
 
     sigma = pc.get_sigma
 
@@ -97,7 +105,8 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         sigma=sigma,
         shs = shs,
         colors_precomp = colors_precomp,
-        scaling = scaling
+        scaling = scaling,
+        **({"face_tex": pc._face_tex, "tex_res": pc.tex_res} if use_tex else {})
        )
        
     img_hr = rendered_image.unsqueeze(0)  # -> [1, 3, H, W]

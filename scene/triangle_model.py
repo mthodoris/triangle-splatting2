@@ -88,6 +88,11 @@ class TriangleModel:
         self.free_opacity_floor = None
         self.no_mesh_densify = False # never split mesh-group triangles (keeps the init topology)
 
+        # Per-face texture (--tex_res): a residual RGB colour on a barycentric lattice of level tex_res inside
+        # every triangle, K = (n+1)(n+2)/2 samples per face, added to the vertex colours by the rasterizer.
+        self.tex_res = 0
+        self._face_tex = torch.empty(0)
+
         self.scaling = 1
 
         self.setup_functions()
@@ -107,6 +112,9 @@ class TriangleModel:
         point_cloud_state_dict["features_rest"] = self._features_rest
         point_cloud_state_dict["importance_score"] = self.importance_score
         point_cloud_state_dict["image_size"] = self.image_size
+        if self.tex_res > 0:
+            point_cloud_state_dict["face_tex"] = self._face_tex
+            point_cloud_state_dict["tex_res"] = self.tex_res
         point_cloud_state_dict["opacity_floor"] = self.opacity_floor
         if self._vertex_is_mesh is not None:
             point_cloud_state_dict["vertex_is_mesh"] = self._vertex_is_mesh
@@ -129,6 +137,9 @@ class TriangleModel:
         self._features_dc        = state["features_dc"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
         self._features_rest      = state["features_rest"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
         self.importance_score = state["importance_score"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
+        if state.get("tex_res", 0) > 0:
+            self.tex_res = int(state["tex_res"])
+            self._face_tex = state["face_tex"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
 
 
         # For object extraction
@@ -473,7 +484,44 @@ class TriangleModel:
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=vertex_colors, process=False)
         mesh.export(os.path.join(mesh_path, "mesh.ply"))
 
+        if self.tex_res > 0:
+            self.export_textured_mesh(os.path.join(mesh_path, "mesh_textured.ply"), faces)
+
         return os.path.join(mesh_path, "mesh.ply")
+
+    @torch.no_grad()
+    def export_textured_mesh(self, path, faces):
+        """Write the mesh with its per-face texture baked in: every face split along its texture lattice into
+        tex_res^2 sub-triangles, coloured with the vertex colour plus the texture at each lattice sample.
+        Lattice points shared by neighbouring faces (on edges and vertices) are merged, so the result stays
+        one connected mesh; at merged points the first face's colour is kept."""
+        n = self.tex_res
+        F_all = self._triangle_indices.long()
+        keep = self.triangle_is_mesh()
+        Fm = F_all[keep]
+        tex = self._face_tex.detach()[keep]
+        lat = self.tex_lattice(n)  # [K,2]
+        w = torch.stack([1 - lat.sum(1) / n, lat[:, 0] / n, lat[:, 1] / n], 1)  # [K,3]
+        V = self.vertices.detach()
+        col_v = SH2RGB(self._features_dc.detach().squeeze(1))
+        pos = torch.einsum("kc,fcd->fkd", w, V[Fm])  # [F,K,3]
+        col = (torch.einsum("kc,fcd->fkd", w, col_v[Fm]) + tex).clamp(0, 1)
+        # sub-triangles in lattice coordinates, keeping the parent's winding
+        index = {(int(i), int(j)): k for k, (i, j) in enumerate(lat.tolist())}
+        sub = []
+        for i in range(n):
+            for j in range(n - i):
+                sub.append((index[(i, j)], index[(i + 1, j)], index[(i, j + 1)]))
+                if i + j <= n - 2:
+                    sub.append((index[(i + 1, j)], index[(i + 1, j + 1)], index[(i, j + 1)]))
+        sub = torch.tensor(sub, device=V.device)  # [n^2,3]
+        Fcount, K = pos.shape[0], pos.shape[1]
+        tri = (torch.arange(Fcount, device=V.device)[:, None, None] * K + sub[None]).reshape(-1, 3)
+        mesh = trimesh.Trimesh(vertices=pos.reshape(-1, 3).cpu().numpy(), faces=tri.cpu().numpy(),
+                               vertex_colors=(col.reshape(-1, 3).cpu().numpy() * 255).astype(np.uint8), process=False)
+        mesh.merge_vertices(merge_tex=True, merge_norm=True, digits_vertex=6)
+        mesh.export(path)
+        return path
 
 
     def training_setup(self, training_args, lr_mask, lr_features, weight_lr, lr_sigma, lr_triangles_init):
@@ -528,6 +576,8 @@ class TriangleModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            if group["name"] == "face_tex":
+                continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -543,10 +593,64 @@ class TriangleModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    # ---------------- per-face texture ----------------
+    @staticmethod
+    def tex_lattice(n, device="cuda"):
+        """[K,2] lattice coordinates (i, j) of the K samples (weights i/n, j/n of vertices 1, 2)."""
+        ij = [(i, j) for i in range(n + 1) for j in range(n + 1 - i)]
+        return torch.tensor(ij, device=device, dtype=torch.float32)
+
+    @staticmethod
+    def tex_lookup(tex, w1, w2, n):
+        """Texture value of faces tex [N,K,3] at points with vertex-1/2 weights w1, w2 [N,P] (same as CUDA)."""
+        u = w1.clamp(0, 1) * n; v = w2.clamp(0, 1) * n
+        i = torch.floor(u).clamp(max=n - 1); j = torch.floor(v).clamp(max=n - 1)
+        over = (i + j) > (n - 1)
+        fix_j = over & ((u - i) > (v - j))
+        j = torch.where(fix_j, n - 1 - i, j); i = torch.where(over & ~fix_j, n - 1 - j, i)
+        i = i.clamp(min=0); j = j.clamp(min=0)
+        fu, fv = u - i, v - j
+        idx = lambda a, b: (a * (n + 1) - (a * (a - 1)) / 2 + b).long()
+        lower = (fu + fv) <= 1
+        i0 = torch.where(lower, idx(i, j), idx(i + 1, j + 1)); w0 = torch.where(lower, 1 - fu - fv, fu + fv - 1)
+        i1 = torch.where(lower, idx(i + 1, j), idx(i, j + 1)); wa = torch.where(lower, fu, 1 - fu)
+        i2 = torch.where(lower, idx(i, j + 1), idx(i + 1, j)); wb = torch.where(lower, fv, 1 - fv)
+        g = lambda k: torch.gather(tex, 1, k.unsqueeze(-1).expand(-1, -1, 3))
+        return w0.unsqueeze(-1) * g(i0) + wa.unsqueeze(-1) * g(i1) + wb.unsqueeze(-1) * g(i2)
+
+    def init_texture(self, tex_res, lr):
+        """Add a zero per-face texture of level tex_res to the model and the optimizer."""
+        K = (tex_res + 1) * (tex_res + 2) // 2
+        self.tex_res = tex_res
+        self._face_tex = nn.Parameter(torch.zeros((self._triangle_indices.shape[0], K, 3), device="cuda").requires_grad_(True))
+        self.optimizer.add_param_group({"params": [self._face_tex], "lr": lr, "name": "face_tex"})
+
+    def _set_face_tex(self, new_values, state_fn):
+        """Replace the texture parameter (pruned/extended faces); state_fn maps an Adam moment the same way."""
+        if self.tex_res <= 0:
+            return
+        if self.optimizer is not None:
+            for group in self.optimizer.param_groups:
+                if group["name"] != "face_tex":
+                    continue
+                stored = self.optimizer.state.get(group["params"][0], None)
+                param = nn.Parameter(new_values.requires_grad_(True))
+                if stored is not None:
+                    stored["exp_avg"] = state_fn(stored["exp_avg"])
+                    stored["exp_avg_sq"] = state_fn(stored["exp_avg_sq"])
+                    del self.optimizer.state[group["params"][0]]
+                    self.optimizer.state[param] = stored
+                group["params"][0] = param
+                self._face_tex = param
+                return
+        self._face_tex = nn.Parameter(new_values.requires_grad_(True))
+
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             assert len(group["params"]) == 1
+            if group["name"] not in tensors_dict:
+                continue  # e.g. the per-face texture, kept in sync separately
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -567,7 +671,7 @@ class TriangleModel:
         return optimizable_tensors
     
 
-    def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor=None, new_anchor_normal=None):
+    def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor=None, new_anchor_normal=None, new_face_tex=None):
         # Create dictionary of new tensors to append
         d = {
             "vertices": new_vertices,
@@ -590,6 +694,13 @@ class TriangleModel:
             self._anchor_normal = torch.cat([self._anchor_normal, new_anchor_normal], dim=0)
         if self._vertex_is_mesh is not None:
             self._vertex_is_mesh = torch.cat([self._vertex_is_mesh, self._new_vertex_is_mesh], dim=0)
+
+        if self.tex_res > 0:
+            if new_face_tex is None:
+                new_face_tex = torch.zeros((new_triangles.shape[0],) + tuple(self._face_tex.shape[1:]), device="cuda")
+            extra = new_face_tex.shape[0]
+            self._set_face_tex(torch.cat([self._face_tex.detach(), new_face_tex], 0),
+                               lambda t: torch.cat([t, torch.zeros((extra,) + tuple(t.shape[1:]), device=t.device)], 0))
 
         # Update triangle indices
         self._triangle_indices = torch.cat([
@@ -782,6 +893,8 @@ class TriangleModel:
         # REMOVE ALL TRIANLGES WITH MIN WEIGHT LESS THAN SOME THRESHOLD  #
         ##################################################################
         self._triangle_indices = self._triangle_indices[mask]
+        if self.tex_res > 0:
+            self._set_face_tex(self._face_tex.detach()[mask], lambda t: t[mask])
 
         #################################################
         # WE SET THE CLASS VARIABLES TO THEIR NEW VALUES#
@@ -988,15 +1101,33 @@ class TriangleModel:
         pattern = s[:, 0].long() + 2 * s[:, 1].long() + 4 * s[:, 2].long()
         affected = torch.nonzero(pattern > 0, as_tuple=True)[0]
         slots = torch.cat([F, midpoint[edge_id]], 1)  # [T,6]: v0,v1,v2,m0,m1,m2
-        children = []
+        # barycentric position of each slot in the parent triangle (weights of vertices 0, 1, 2)
+        slot_bary = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1], [.5, .5, 0], [0, .5, .5], [.5, 0, .5]], device=V.device)
+        children, child_tex = [], []
+        if self.tex_res > 0:
+            lat = self.tex_lattice(self.tex_res) / self.tex_res  # [K,2] child weights of its vertices 1, 2
         for code, template in self._REFINE_TEMPLATES.items():
             idx = torch.nonzero(pattern == code, as_tuple=True)[0]
             if idx.numel():
                 t = torch.tensor(template, device=V.device)
                 children.append(slots[idx][:, t].reshape(-1, 3))
+                if self.tex_res > 0:
+                    for c in range(t.shape[0]):
+                        # parent barycentrics of the child's lattice samples, then the parent's texture there
+                        cb = slot_bary[t[c]]  # [3 child vertices, 3 parent weights]
+                        wc = torch.stack([1 - lat.sum(1), lat[:, 0], lat[:, 1]], 1)  # [K,3] child weights
+                        pb = wc @ cb  # [K,3] parent weights
+                        tex = self.tex_lookup(self._face_tex.detach()[idx], pb[None, :, 1].expand(idx.numel(), -1),
+                                              pb[None, :, 2].expand(idx.numel(), -1), self.tex_res)
+                        child_tex.append((c, tex))
+                    # keep the same order as children: per parent, its template's children in sequence
+                    k = len(t)
+                    block = torch.stack([ct for _, ct in child_tex[-k:]], 1).reshape(-1, child_tex[-1][1].shape[1], 3)
+                    child_tex = child_tex[:-k] + [(-1, block)]
         children = torch.cat(children, 0).to(torch.int32)
+        new_face_tex = torch.cat([b for _, b in child_tex], 0) if self.tex_res > 0 else None
 
-        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, children, new_anchor, new_anchor_normal)
+        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, children, new_anchor, new_anchor_normal, new_face_tex)
         keep = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool, device=V.device)
         keep[affected] = False  # the parents (children were appended after them)
         self.prune_triangles(keep)
