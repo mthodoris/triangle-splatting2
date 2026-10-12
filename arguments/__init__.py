@@ -167,6 +167,7 @@ class OptimizationParams(ParamGroup):
         self.splitt_large_triangles = 100
         self.start_upsampling = 20000
         self.upscaling_factor = 2
+        self.final_scale_from = 25000 # iteration at which the render scale switches to 4
 
         self.size_probs_zero = 7.5e-05
         self.size_probs_zero_image_space = 0.0
