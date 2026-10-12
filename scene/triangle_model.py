@@ -493,8 +493,8 @@ class TriangleModel:
     def export_textured_mesh(self, path, faces):
         """Write the mesh with its per-face texture baked in: every face split along its texture lattice into
         tex_res^2 sub-triangles, coloured with the vertex colour plus the texture at each lattice sample.
-        Lattice points shared by neighbouring faces (on edges and vertices) are merged, so the result stays
-        one connected mesh; at merged points the first face's colour is kept."""
+        Lattice points shared by neighbouring faces (on edges and vertices) are merged by topology, so the result
+        stays one connected mesh; at merged points the first face's colour and position are kept."""
         n = self.tex_res
         F_all = self._triangle_indices.long()
         keep = self.triangle_is_mesh()
@@ -516,10 +516,32 @@ class TriangleModel:
                     sub.append((index[(i + 1, j)], index[(i + 1, j + 1)], index[(i, j + 1)]))
         sub = torch.tensor(sub, device=V.device)  # [n^2,3]
         Fcount, K = pos.shape[0], pos.shape[1]
-        tri = (torch.arange(Fcount, device=V.device)[:, None, None] * K + sub[None]).reshape(-1, 3)
-        mesh = trimesh.Trimesh(vertices=pos.reshape(-1, 3).cpu().numpy(), faces=tri.cpu().numpy(),
-                               vertex_colors=(col.reshape(-1, 3).cpu().numpy() * 255).astype(np.uint8), process=False)
-        mesh.merge_vertices(merge_tex=True, merge_norm=True, digits_vertex=6)
+        # merge lattice points by topology, not by position (rounding positions leaves seams at 1/3 points):
+        # a corner is keyed by its mesh vertex, an edge point by its edge and step from the lower vertex id,
+        # an interior point by its face
+        cnt = torch.stack([n - lat.sum(1), lat[:, 0], lat[:, 1]], 1).long()  # [K,3] integer barycentrics
+        fid = torch.arange(Fcount, device=V.device)
+        keys = torch.zeros((Fcount, K, 4), dtype=torch.long, device=V.device)
+        for k in range(K):
+            nz = (cnt[k] > 0).nonzero().flatten().tolist()
+            if len(nz) == 1:
+                keys[:, k, 1] = Fm[:, nz[0]]
+            elif len(nz) == 2:
+                va, vb = Fm[:, nz[0]], Fm[:, nz[1]]
+                keys[:, k, 0] = 1
+                keys[:, k, 1] = torch.minimum(va, vb)
+                keys[:, k, 2] = torch.maximum(va, vb)
+                keys[:, k, 3] = torch.where(va < vb, cnt[k, nz[0]], cnt[k, nz[1]])
+            else:
+                keys[:, k, 0] = 2
+                keys[:, k, 1] = fid
+                keys[:, k, 2] = k
+        uniq, inv = torch.unique(keys.reshape(-1, 4), dim=0, return_inverse=True)
+        first = torch.full((uniq.shape[0],), inv.numel(), dtype=torch.long, device=V.device)
+        first.scatter_reduce_(0, inv, torch.arange(inv.numel(), device=V.device), reduce="amin")
+        tri = inv.reshape(Fcount, K)[fid[:, None, None], sub[None]].reshape(-1, 3)
+        mesh = trimesh.Trimesh(vertices=pos.reshape(-1, 3)[first].cpu().numpy(), faces=tri.cpu().numpy(),
+                               vertex_colors=(col.reshape(-1, 3)[first].cpu().numpy() * 255).astype(np.uint8), process=False)
         mesh.export(path)
         return path
 
