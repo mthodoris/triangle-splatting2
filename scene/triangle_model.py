@@ -1043,6 +1043,8 @@ class TriangleModel:
         6: [(5, 4, 2), (0, 1, 4), (0, 4, 5)],
         5: [(0, 3, 5), (3, 1, 2), (3, 2, 5)],
         7: [(0, 3, 5), (3, 1, 4), (5, 4, 2), (3, 4, 5)],
+        # Catmull-Clark on a triangle: 3 quads (v_i, m, c, m') with the face point c = slot 6, each cut along v_i-c
+        8: [(0, 3, 6), (0, 6, 5), (1, 4, 6), (1, 6, 3), (2, 5, 6), (2, 6, 4)],
     }
 
     def accumulate_color_grad(self):
@@ -1087,11 +1089,15 @@ class TriangleModel:
         self._inr_views_ok[vis] += (inr >= min_inradius).float()
 
     @torch.no_grad()
-    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0):
+    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0, catmull_clark=False):
         """Conforming refinement of the mesh group: pick the `fraction` of mesh triangles with the highest
         mean color gradient of their vertices (longest edge above min_edge), split their longest edge at its
         midpoint and re-triangulate every triangle touching a split edge (neighbours included), so no
-        T-junctions form. Returns the number of new vertices."""
+        T-junctions form. With catmull_clark, a selected triangle instead gets all three edges split plus a face
+        point (centroid), i.e. one Catmull-Clark step on a triangle: 3 quads, each cut into 2 triangles (6 children).
+        New edge points use the CC rule (v1 + v2 + c1 + c2) / 4 with c the centroids of the two adjacent
+        triangles (midpoint on boundary / non-manifold edges); old vertices stay fixed (interpolating).
+        Neighbours of selected triangles are re-triangulated as above. Returns the number of new vertices."""
         if getattr(self, "_color_grad", None) is None or self._color_grad.shape[0] != self.vertices.shape[0]:
             return 0
         F = self._triangle_indices.long()
@@ -1121,7 +1127,7 @@ class TriangleModel:
                 eligible &= self._inr_views > 0
             else:
                 eligible &= inr >= min_inradius
-        k = min(int(fraction * int(is_mesh_tri.sum().item())), int(eligible.sum().item()), budget)
+        k = min(int(fraction * int(is_mesh_tri.sum().item())), int(eligible.sum().item()), budget // 4 if catmull_clark else budget)
         if k <= 0:
             return 0
         selected = torch.topk(torch.where(eligible, score, torch.full_like(score, -1.0)), k).indices
@@ -1131,33 +1137,61 @@ class TriangleModel:
         edges, edge_id = torch.unique(torch.sort(ends.reshape(-1, 2), dim=1).values, dim=0, return_inverse=True)
         edge_id = edge_id.reshape(T, 3)
         split = torch.zeros(edges.shape[0], dtype=torch.bool, device=V.device)
-        split[edge_id[selected, longest[selected]]] = True
+        if catmull_clark:
+            split[edge_id[selected].reshape(-1)] = True
+        else:
+            split[edge_id[selected, longest[selected]]] = True
         split_ids = torch.nonzero(split, as_tuple=True)[0]
         midpoint = torch.full((edges.shape[0],), -1, dtype=torch.long, device=V.device)
         midpoint[split_ids] = V.shape[0] + torch.arange(split_ids.numel(), device=V.device)
 
-        # new vertices: averages of the edge's endpoints
+        # new vertices: averages of the edge's endpoints (Catmull-Clark: pulled towards the adjacent centroids)
         u, w = edges[split_ids, 0], edges[split_ids, 1]
         new_vertices = (V[u] + V[w]) / 2.0
+        if catmull_clark:
+            centroid = V[F].mean(1)  # [T,3] face points of all triangles
+            csum = torch.zeros(edges.shape[0], 3, device=V.device).index_add_(0, edge_id.reshape(-1), centroid.repeat_interleave(3, dim=0))
+            ccount = torch.zeros(edges.shape[0], device=V.device).index_add_(0, edge_id.reshape(-1), torch.ones(T * 3, device=V.device))
+            interior = (ccount[split_ids] == 2)[:, None]
+            new_vertices = torch.where(interior, (V[u] + V[w] + csum[split_ids]) / 4.0, new_vertices)
         new_features_dc = (self._features_dc[u] + self._features_dc[w]) / 2.0
         new_features_rest = (self._features_rest[u] + self._features_rest[w]) / 2.0
         weights = self.get_vertex_weight
-        new_vertex_weight = self.inverse_opacity((weights[u] + weights[w]) / 2.0, self.vertex_floor(u))
+        new_weight = (weights[u] + weights[w]) / 2.0
         new_anchor = new_anchor_normal = None
         if self._anchor is not None:
             new_anchor = (self._anchor[u] + self._anchor[w]) / 2.0
             n = self._anchor_normal[u] + self._anchor_normal[w]
             new_anchor_normal = torch.nn.functional.normalize(torch.where(n.norm(dim=1, keepdim=True) > 1e-6, n, self._anchor_normal[u]), dim=1)
+        floor_idx = u
+        face_point = torch.full((T,), -1, dtype=torch.long, device=V.device)
+        if catmull_clark:
+            # one face point per selected triangle: centroid, attributes averaged over its three vertices
+            Fs = F[selected]
+            face_point[selected] = V.shape[0] + split_ids.numel() + torch.arange(k, device=V.device)
+            new_vertices = torch.cat([new_vertices, V[Fs].mean(1)], 0)
+            new_features_dc = torch.cat([new_features_dc, self._features_dc[Fs].mean(1)], 0)
+            new_features_rest = torch.cat([new_features_rest, self._features_rest[Fs].mean(1)], 0)
+            new_weight = torch.cat([new_weight, weights[Fs].mean(1)], 0)
+            floor_idx = torch.cat([u, Fs[:, 0]], 0)
+            if self._anchor is not None:
+                new_anchor = torch.cat([new_anchor, self._anchor[Fs].mean(1)], 0)
+                n = self._anchor_normal[Fs].sum(1)
+                n = torch.nn.functional.normalize(torch.where(n.norm(dim=1, keepdim=True) > 1e-6, n, self._anchor_normal[Fs[:, 0]]), dim=1)
+                new_anchor_normal = torch.cat([new_anchor_normal, n], 0)
+        new_vertex_weight = self.inverse_opacity(new_weight, self.vertex_floor(floor_idx))
         if self._vertex_is_mesh is not None:
-            self._new_vertex_is_mesh = torch.ones(split_ids.numel(), dtype=torch.bool, device=V.device)
+            self._new_vertex_is_mesh = torch.ones(new_vertices.shape[0], dtype=torch.bool, device=V.device)
 
         # children of every triangle touching a split edge
         s = split[edge_id]  # [T,3]
         pattern = s[:, 0].long() + 2 * s[:, 1].long() + 4 * s[:, 2].long()
+        if catmull_clark:
+            pattern[selected] = 8
         affected = torch.nonzero(pattern > 0, as_tuple=True)[0]
-        slots = torch.cat([F, midpoint[edge_id]], 1)  # [T,6]: v0,v1,v2,m0,m1,m2
+        slots = torch.cat([F, midpoint[edge_id], face_point[:, None]], 1)  # [T,7]: v0,v1,v2,m0,m1,m2,c
         # barycentric position of each slot in the parent triangle (weights of vertices 0, 1, 2)
-        slot_bary = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1], [.5, .5, 0], [0, .5, .5], [.5, 0, .5]], device=V.device)
+        slot_bary = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1], [.5, .5, 0], [0, .5, .5], [.5, 0, .5], [1 / 3, 1 / 3, 1 / 3]], device=V.device)
         children, child_tex = [], []
         if self.tex_res > 0:
             lat = self.tex_lattice(self.tex_res) / self.tex_res  # [K,2] child weights of its vertices 1, 2
@@ -1188,7 +1222,7 @@ class TriangleModel:
         self.prune_triangles(keep)
         self._color_grad = None
         self._max_inradius = None
-        return int(split_ids.numel())
+        return int(new_vertices.shape[0])
 
     def triangle_areas(self):
         tri = self.vertices[self._triangle_indices]                    # [T, 3, 3]
