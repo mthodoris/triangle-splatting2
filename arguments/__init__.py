@@ -162,6 +162,7 @@ class OptimizationParams(ParamGroup):
         self.refine_min_edge = 0.3 # do not split triangles whose longest edge is below this many init mean edges
         self.mesh_max_vertices = 4000000
         self.refine_catmull_clark = False # selected triangles get one Catmull-Clark step (edge points + face point, 6 children) instead of a longest-edge split; old vertices stay fixed
+        self.refine_cc_move_old = False # with --refine_catmull_clark: also move the corners of selected triangles to their Catmull-Clark positions (surface smooths/shrinks)
         self.refine_view_fraction = 0.0 # >0: a triangle must reach --refine_min_inradius in at least this share of the views it is drawn in (0 = its best view only)
         self.refine_min_inradius = 0.0 # only split triangles whose largest on-screen inradius (render pixels) reaches this; the rasterizer skips triangles under 1 (0 = off)
         self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)

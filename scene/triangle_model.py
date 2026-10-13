@@ -1089,7 +1089,7 @@ class TriangleModel:
         self._inr_views_ok[vis] += (inr >= min_inradius).float()
 
     @torch.no_grad()
-    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0, catmull_clark=False):
+    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0, catmull_clark=False, move_old=False):
         """Conforming refinement of the mesh group: pick the `fraction` of mesh triangles with the highest
         mean color gradient of their vertices (longest edge above min_edge), split their longest edge at its
         midpoint and re-triangulate every triangle touching a split edge (neighbours included), so no
@@ -1097,7 +1097,10 @@ class TriangleModel:
         point (centroid), i.e. one Catmull-Clark step on a triangle: 3 quads, each cut into 2 triangles (6 children).
         New edge points use the CC rule (v1 + v2 + c1 + c2) / 4 with c the centroids of the two adjacent
         triangles (midpoint on boundary / non-manifold edges); old vertices stay fixed (interpolating).
-        Neighbours of selected triangles are re-triangulated as above. Returns the number of new vertices."""
+        With move_old (full Catmull-Clark smoothing) the corners of selected triangles also move to
+        (Q + 2R + (n-3) P) / n (Q: mean adjacent centroid, R: mean adjacent edge midpoint, n: valence);
+        boundary and non-manifold vertices stay fixed. Neighbours of selected triangles are re-triangulated
+        as above. Returns the number of new vertices."""
         if getattr(self, "_color_grad", None) is None or self._color_grad.shape[0] != self.vertices.shape[0]:
             return 0
         F = self._triangle_indices.long()
@@ -1154,6 +1157,24 @@ class TriangleModel:
             ccount = torch.zeros(edges.shape[0], device=V.device).index_add_(0, edge_id.reshape(-1), torch.ones(T * 3, device=V.device))
             interior = (ccount[split_ids] == 2)[:, None]
             new_vertices = torch.where(interior, (V[u] + V[w] + csum[split_ids]) / 4.0, new_vertices)
+        moved_ids = moved_pos = None
+        if catmull_clark and move_old:
+            nV = V.shape[0]
+            ev = edges.reshape(-1)
+            valence = torch.zeros(nV, device=V.device).index_add_(0, ev, torch.ones(ev.numel(), device=V.device))
+            rsum = torch.zeros(nV, 3, device=V.device).index_add_(0, ev, ((V[edges[:, 0]] + V[edges[:, 1]]) / 2.0).repeat_interleave(2, dim=0))
+            nonmanifold = torch.zeros(nV, device=V.device).index_add_(0, ev, (ccount != 2).float().repeat_interleave(2)) > 0
+            qsum = torch.zeros(nV, 3, device=V.device).index_add_(0, F.reshape(-1), centroid.repeat_interleave(3, dim=0))
+            fcount = torch.zeros(nV, device=V.device).index_add_(0, F.reshape(-1), torch.ones(T * 3, device=V.device))
+            n = valence.clamp(min=1)[:, None]
+            cc_pos = (qsum / fcount.clamp(min=1)[:, None] + 2.0 * rsum / n + (n - 3.0) * V) / n
+            corner = torch.zeros(nV, dtype=torch.bool, device=V.device)
+            corner[F[selected].reshape(-1)] = True
+            corner &= ~nonmanifold & (valence >= 3)
+            if self._vertex_is_mesh is not None:
+                corner &= self._vertex_is_mesh
+            moved_ids = torch.nonzero(corner, as_tuple=True)[0]
+            moved_pos = cc_pos[moved_ids]
         new_features_dc = (self._features_dc[u] + self._features_dc[w]) / 2.0
         new_features_rest = (self._features_rest[u] + self._features_rest[w]) / 2.0
         weights = self.get_vertex_weight
@@ -1217,6 +1238,8 @@ class TriangleModel:
         new_face_tex = torch.cat([b for _, b in child_tex], 0) if self.tex_res > 0 else None
 
         self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, children, new_anchor, new_anchor_normal, new_face_tex)
+        if moved_ids is not None:
+            self.vertices.data[moved_ids] = moved_pos
         keep = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool, device=V.device)
         keep[affected] = False  # the parents (children were appended after them)
         self.prune_triangles(keep)
