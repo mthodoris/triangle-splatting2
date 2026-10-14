@@ -1089,7 +1089,7 @@ class TriangleModel:
         self._inr_views_ok[vis] += (inr >= min_inradius).float()
 
     @torch.no_grad()
-    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0, catmull_clark=False, move_old=False):
+    def refine_mesh(self, fraction, min_edge, max_vertices, min_inradius=0.0, view_fraction=0.0, catmull_clark=False, move_old=False, geo_angle=0.0):
         """Conforming refinement of the mesh group: pick the `fraction` of mesh triangles with the highest
         mean color gradient of their vertices (longest edge above min_edge), split their longest edge at its
         midpoint and re-triangulate every triangle touching a split edge (neighbours included), so no
@@ -1112,6 +1112,11 @@ class TriangleModel:
         if budget <= 0:
             return 0
 
+        # unique edges; each triangle's three edge ids
+        ends = torch.stack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)  # [T,3,2]
+        edges, edge_id = torch.unique(torch.sort(ends.reshape(-1, 2), dim=1).values, dim=0, return_inverse=True)
+        edge_id = edge_id.reshape(T, 3)
+
         # score: mean over the triangle's vertices of the average color-gradient norm per step seen
         vertex_score = self._color_grad / self._color_grad_count.clamp(min=1)
         score = vertex_score[F].mean(1)
@@ -1119,6 +1124,16 @@ class TriangleModel:
         edge_len = torch.stack([(tri[:, 1] - tri[:, 0]).norm(dim=1), (tri[:, 2] - tri[:, 1]).norm(dim=1), (tri[:, 0] - tri[:, 2]).norm(dim=1)], 1)
         longest = edge_len.argmax(1)
         eligible = is_mesh_tri & (edge_len.max(1).values > min_edge) & (score > 0)
+        if geo_angle > 0:
+            n = torch.nn.functional.normalize(torch.nan_to_num(torch.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=1)), dim=1)
+            tid = torch.arange(T, device=V.device).repeat_interleave(3)
+            eid = edge_id.reshape(-1)
+            first = torch.full((edges.shape[0],), T, dtype=torch.long, device=V.device).scatter_reduce(0, eid, tid, "amin", include_self=True)
+            last = torch.full((edges.shape[0],), -1, dtype=torch.long, device=V.device).scatter_reduce(0, eid, tid, "amax", include_self=True)
+            two = torch.zeros(edges.shape[0], device=V.device).index_add_(0, eid, torch.ones_like(eid, dtype=torch.float)) == 2
+            cos = (n[first.clamp(max=T - 1)] * n[last.clamp(min=0)]).sum(1).abs().clamp(max=1.0)
+            edge_angle = torch.where(two, torch.rad2deg(torch.acos(cos)), torch.zeros_like(cos))
+            eligible &= edge_angle[edge_id].max(1).values >= geo_angle
         if min_inradius > 0:
             # only triangles big enough on screen that their children (about half the inradius) are still drawn
             inr = getattr(self, "_max_inradius", None)
@@ -1135,10 +1150,6 @@ class TriangleModel:
             return 0
         selected = torch.topk(torch.where(eligible, score, torch.full_like(score, -1.0)), k).indices
 
-        # unique edges; each triangle's three edge ids
-        ends = torch.stack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)  # [T,3,2]
-        edges, edge_id = torch.unique(torch.sort(ends.reshape(-1, 2), dim=1).values, dim=0, return_inverse=True)
-        edge_id = edge_id.reshape(T, 3)
         split = torch.zeros(edges.shape[0], dtype=torch.bool, device=V.device)
         if catmull_clark:
             split[edge_id[selected].reshape(-1)] = True

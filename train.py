@@ -338,7 +338,7 @@ def training(
                 if (opt.mesh_refine and opt.refine_from <= iteration <= opt.refine_until
                         and iteration % opt.refine_interval == 0):
                     added = triangles.refine_mesh(opt.refine_fraction, opt.refine_min_edge * triangles.init_edge, opt.mesh_max_vertices,
-                                                  opt.refine_min_inradius, opt.refine_view_fraction, opt.refine_catmull_clark, opt.refine_cc_move_old)
+                                                  opt.refine_min_inradius, opt.refine_view_fraction, opt.refine_catmull_clark, opt.refine_cc_move_old, opt.refine_geo_angle)
                     num_mesh_v = int(mesh_vertex_index().numel())
                     print("[ITER {}] mesh refinement: {} new vertices, mesh now {} vertices / {} faces".format(
                         iteration, added, num_mesh_v, int(triangles.triangle_is_mesh().sum().item())))
