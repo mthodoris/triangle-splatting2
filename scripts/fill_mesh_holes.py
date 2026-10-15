@@ -47,33 +47,40 @@ def find_holes(V, F, max_loop_edges, max_extent, through_nonmanifold=False, min_
         # edge (a, b) the shortest path from a to b that avoids that edge closes the hole's rim. Non-manifold edges
         # cost twice their length so rims prefer real boundary edges.
         cutoff = 2.5 * max_extent * edge_len
-        for a, b in boundary_directed:
-            a, b = int(a), int(b)
-            if not G.has_edge(a, b):
-                continue
+        passes = []  # pass 1: real boundary edges only; pass 2 (leftovers): rims may also run along non-manifold edges
+        for allow_nm in (False, True):
+            found = []
+            for a, b in boundary_directed:
+                a, b = int(a), int(b)
+                if not G.has_edge(a, b):
+                    continue
 
-            def weight(u, v, d, a=a, b=b):
-                if (u == a and v == b) or (u == b and v == a):
-                    return None
-                return d["weight"] * (2.0 if d["nm"] else 1.0)
+                def weight(u, v, d, a=a, b=b, allow_nm=allow_nm):
+                    if (u == a and v == b) or (u == b and v == a):
+                        return None
+                    if d["nm"] and not allow_nm:
+                        return None
+                    return d["weight"] * (2.0 if d["nm"] else 1.0)
 
-            try:
-                _, path = nx.single_source_dijkstra(G, a, target=b, cutoff=cutoff, weight=weight)
-            except nx.NetworkXNoPath:
-                continue
-            if len(path) < 3 or len(path) > max_loop_edges:
-                stats["too big"] += 1
-                continue
-            P = V[path]
-            if np.linalg.norm(P.max(0) - P.min(0)) > max_extent * edge_len:
-                stats["too big"] += 1
-                continue
-            ring = [(path[i], path[(i + 1) % len(path)]) for i in range(len(path))]
-            n_real = sum(not G[u][v]["nm"] for u, v in ring)
-            if n_real == 0 or n_real < min_boundary_share * len(ring):
-                stats["mostly non-manifold"] += 1
-                continue
-            candidates.append(path)
+                try:
+                    _, path = nx.single_source_dijkstra(G, a, target=b, cutoff=cutoff, weight=weight)
+                except nx.NetworkXNoPath:
+                    continue
+                if len(path) < 3 or len(path) > max_loop_edges:
+                    stats["too big"] += 1
+                    continue
+                P = V[path]
+                if np.linalg.norm(P.max(0) - P.min(0)) > max_extent * edge_len:
+                    stats["too big"] += 1
+                    continue
+                ring = [(path[i], path[(i + 1) % len(path)]) for i in range(len(path))]
+                n_real = sum(not G[u][v]["nm"] for u, v in ring)
+                if n_real == 0 or n_real < min_boundary_share * len(ring):
+                    stats["mostly non-manifold"] += 1
+                    continue
+                found.append(path)
+            passes.append(sorted(found, key=len))
+        candidates = passes[0] + passes[1]  # pure boundary rims win over rims through non-manifold edges
         stats["components"] = nx.number_connected_components(G)
     for nodes in ([] if through_nonmanifold else nx.connected_components(G)):
         H = G.subgraph(nodes)
@@ -98,7 +105,8 @@ def find_holes(V, F, max_loop_edges, max_extent, through_nonmanifold=False, min_
                 stats["mostly non-manifold"] += 1
                 continue
             candidates.append(ordered)
-    candidates.sort(key=len)
+    if not through_nonmanifold:
+        candidates.sort(key=len)
     used, cycles = set(), []
     for cyc in candidates:
         edges = {frozenset((cyc[i], cyc[(i + 1) % len(cyc)])) for i in range(len(cyc))}
