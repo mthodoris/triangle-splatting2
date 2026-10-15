@@ -117,6 +117,45 @@ def find_holes(V, F, max_loop_edges, max_extent, through_nonmanifold=False, min_
     return cycles, directed, stats, int(len(boundary_directed))
 
 
+def drop_nonmanifold_faces(V, F, max_rounds=20):
+    """Make every edge belong to at most two faces: at an edge shared by 3+ faces keep the two whose normals are most
+    parallel (sign-free, i.e. the pair that continues each other best) and drop the rest. Repeats because dropping
+    a face lowers the count of its other two edges. Returns the kept faces."""
+    n = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    area = np.linalg.norm(n, axis=1)
+    n = n / np.maximum(area, 1e-20)[:, None]
+    alive = np.ones(len(F), dtype=bool)
+    for _ in range(max_rounds):
+        idx = np.nonzero(alive)[0]
+        Fa = F[idx]
+        ends = np.concatenate([Fa[:, [0, 1]], Fa[:, [1, 2]], Fa[:, [2, 0]]])
+        key = np.sort(ends, axis=1)
+        key = key[:, 0].astype(np.int64) * len(V) + key[:, 1]
+        face_of = np.tile(idx, 3)
+        order = np.argsort(key, kind="stable")
+        key, face_of = key[order], face_of[order]
+        starts = np.nonzero(np.r_[True, key[1:] != key[:-1]])[0]
+        counts = np.diff(np.r_[starts, len(key)])
+        bad = np.nonzero(counts > 2)[0]
+        if len(bad) == 0:
+            break
+        for g in bad:
+            faces = face_of[starts[g]:starts[g] + counts[g]]
+            faces = faces[alive[faces]]
+            if len(faces) <= 2:
+                continue
+            best, best_score = None, -1.0
+            for i in range(len(faces)):
+                for j in range(i + 1, len(faces)):
+                    score = abs(float(n[faces[i]] @ n[faces[j]])) + 1e-6 * (area[faces[i]] + area[faces[j]])
+                    if score > best_score:
+                        best, best_score = (faces[i], faces[j]), score
+            for f in faces:
+                if f not in best:
+                    alive[f] = False
+    return F[alive]
+
+
 def order_cycle(H, cycle):
     """Vertices of a simple cycle (given as a node list from the cycle basis) in walking order."""
     nodes = set(cycle)
@@ -144,6 +183,7 @@ def main():
     parser.add_argument("--max_extent", type=float, default=8.0, help="largest bounding-box diagonal of a hole, in mean edges")
     parser.add_argument("--through_nonmanifold", action="store_true", help="let hole rims run along non-manifold edges (needed: every open boundary chain ends on one)")
     parser.add_argument("--min_boundary_share", type=float, default=0.5, help="with --through_nonmanifold: share of a rim that must be real boundary edges")
+    parser.add_argument("--fix_nonmanifold", action="store_true", help="first drop the extra faces at edges shared by 3+ faces (keeps the two that continue each other best); removes real geometry, report says how much")
     parser.add_argument("--debug_ply", default=None, help="also write the filled mesh with the new faces in red")
     args = parser.parse_args()
 
@@ -155,6 +195,10 @@ def main():
     else:
         C = np.full((len(V), 3), 128.0)
 
+    if args.fix_nonmanifold:
+        n_before = len(F)
+        F = drop_nonmanifold_faces(V, F)
+        print("fix_nonmanifold: dropped {} of {} faces ({:.1f}%)".format(n_before - len(F), n_before, 100.0 * (n_before - len(F)) / n_before))
     F0 = len(F)
     # --through_nonmanifold: first the fast search that may run along non-manifold edges, then the exact minimum
     # cycle basis on the real boundary edges of the result, which still finds a few simple loops the first one misses
