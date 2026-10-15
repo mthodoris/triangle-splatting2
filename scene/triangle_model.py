@@ -385,6 +385,17 @@ class TriangleModel:
 
         mesh = trimesh.load(mesh_path, process=False, force="mesh")
 
+        # Drop vertices no face uses. With --free_triangles the "prune unused vertices" step would delete them at the
+        # first pruning iteration, changing the number of mesh vertices after the Large Steps operator was built.
+        used = np.zeros(len(mesh.vertices), dtype=bool)
+        used[np.asarray(mesh.faces).reshape(-1)] = True
+        if not used.all():
+            remap = np.full(len(used), -1, dtype=np.int64)
+            remap[used] = np.arange(int(used.sum()))
+            colors = np.asarray(mesh.visual.vertex_colors)[used] if mesh.visual.kind == "vertex" else None
+            print("Mesh: dropped {} of {} vertices that no face uses".format(int((~used).sum()), used.size))
+            mesh = trimesh.Trimesh(np.asarray(mesh.vertices)[used], remap[np.asarray(mesh.faces)], vertex_colors=colors, process=False)
+
         _points = torch.tensor(np.asarray(mesh.vertices)).float().cuda()
         faces = torch.tensor(np.asarray(mesh.faces)).to(torch.int64).cuda()
 
