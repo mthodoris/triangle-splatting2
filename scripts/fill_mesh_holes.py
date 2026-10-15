@@ -155,36 +155,48 @@ def main():
     else:
         C = np.full((len(V), 3), 128.0)
 
-    cycles, directed, stats, n_boundary = find_holes(V, F, args.max_loop_edges, args.max_extent, args.through_nonmanifold, args.min_boundary_share)
-    new_v, new_c, new_f = [], [], []
-    for cyc in cycles:
-        loop = np.asarray(cyc)
-        n = len(loop)
-        # existing faces use a->b along the loop for some edges: wind the fill the other way round
-        forward = sum((int(loop[i]), int(loop[(i + 1) % n])) in directed for i in range(n))
-        backward = sum((int(loop[(i + 1) % n]), int(loop[i])) in directed for i in range(n))
-        if forward < backward:
-            loop = loop[::-1]
-        if n == 3:
-            new_f.append([loop[1], loop[0], loop[2]])
-            continue
-        c = len(V) + len(new_v)
-        new_v.append(V[loop].mean(0))
-        new_c.append(C[loop].mean(0))
-        for i in range(n):
-            new_f.append([loop[(i + 1) % n], loop[i], c])
-    V2 = np.concatenate([V, np.array(new_v).reshape(-1, 3)])
-    C2 = np.concatenate([C, np.array(new_c).reshape(-1, 3)]).clip(0, 255).astype(np.uint8)
-    F2 = np.concatenate([F, np.array(new_f, dtype=np.int64).reshape(-1, 3)])
+    F0 = len(F)
+    # --through_nonmanifold: first the fast search that may run along non-manifold edges, then the exact minimum
+    # cycle basis on the real boundary edges of the result, which still finds a few simple loops the first one misses
+    modes = [True, False] if args.through_nonmanifold else [False]
+    n_boundary, n_holes, n_added_v = None, 0, 0
+    for mode in modes:
+        cycles, directed, stats, n_b = find_holes(V, F, args.max_loop_edges, args.max_extent, mode, args.min_boundary_share)
+        n_boundary = n_b if n_boundary is None else n_boundary
+        new_v, new_c, new_f = [], [], []
+        for cyc in cycles:
+            loop = np.asarray(cyc)
+            n = len(loop)
+            # existing faces use a->b along the loop for some edges: wind the fill the other way round
+            forward = sum((int(loop[i]), int(loop[(i + 1) % n])) in directed for i in range(n))
+            backward = sum((int(loop[(i + 1) % n]), int(loop[i])) in directed for i in range(n))
+            if forward < backward:
+                loop = loop[::-1]
+            if n == 3:
+                new_f.append([loop[1], loop[0], loop[2]])
+                continue
+            c = len(V) + len(new_v)
+            new_v.append(V[loop].mean(0))
+            new_c.append(C[loop].mean(0))
+            for i in range(n):
+                new_f.append([loop[(i + 1) % n], loop[i], c])
+        V = np.concatenate([V, np.array(new_v).reshape(-1, 3)])
+        C = np.concatenate([C, np.array(new_c).reshape(-1, 3)])
+        F = np.concatenate([F, np.array(new_f, dtype=np.int64).reshape(-1, 3)])
+        n_holes += len(cycles)
+        n_added_v += len(new_v)
+        print("pass {}: filled {} holes (components {components}, skipped: too big {too big}, mostly non-manifold {mostly non-manifold})".format(
+            "with non-manifold rims" if mode else "real boundary only", len(cycles), **stats))
+    V2, F2, C2 = V, F, C.clip(0, 255).astype(np.uint8)
     trimesh.Trimesh(V2, F2, vertex_colors=C2, process=False).export(args.out)
     if args.debug_ply:
         face_colors = np.tile(np.array([170, 170, 170, 255], dtype=np.uint8), (len(F2), 1))
-        face_colors[len(F):] = [255, 0, 0, 255]
+        face_colors[F0:] = [255, 0, 0, 255]
         trimesh.Trimesh(V2, F2, face_colors=face_colors, process=False).export(args.debug_ply)
-    closed = sum(len(c) for c in cycles)
-    print("boundary edges {} -> about {} | filled {} holes (<= {} edges, <= {} mean edges across): +{} vertices, +{} faces".format(
-        n_boundary, n_boundary - closed, len(cycles), args.max_loop_edges, args.max_extent, len(new_v), len(new_f)))
-    print("components: {components}, with cycles: {with cycles}, cycles skipped: too big {too big}, mostly non-manifold {mostly non-manifold}".format(**stats))
+    he = np.concatenate([F2[:, [0, 1]], F2[:, [1, 2]], F2[:, [2, 0]]])
+    _, cnt = np.unique(np.sort(he, axis=1), axis=0, return_counts=True)
+    print("filled {} holes in total: +{} vertices, +{} faces | boundary edges {} -> {}".format(
+        n_holes, n_added_v, len(F2) - F0, n_boundary, int((cnt == 1).sum())))
 
 
 if __name__ == "__main__":
