@@ -17,6 +17,8 @@ from argparse import ArgumentParser
 
 import networkx as nx
 import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 import trimesh
 
 
@@ -156,6 +158,175 @@ def drop_nonmanifold_faces(V, F, max_rounds=20):
     return F[alive]
 
 
+
+# ---- Liepa-style hole filling (Liepa 2003, "Filling holes in meshes") -------------------------------------------
+# 1. minimum-weight triangulation of the rim polygon (smallest worst dihedral angle, then smallest area),
+# 2. refinement: insert a vertex in every triangle whose centroid is farther from its corners than the local edge
+#    length, relaxing edges toward Delaunay after each round,
+# 3. fairing: the new vertices are placed by minimising a thin-plate (bi-Laplacian) energy with the rim fixed.
+
+ALPHA = np.sqrt(2.0)
+
+
+def _angle(n1, n2, sign_free=False):
+    l1, l2 = np.linalg.norm(n1), np.linalg.norm(n2)
+    if l1 < 1e-20 or l2 < 1e-20:
+        return 0.0
+    c = float(n1 @ n2) / (l1 * l2)
+    if sign_free:
+        c = abs(c)
+    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+
+
+def triangulate_min_weight(P, outer, forbidden=frozenset()):
+    """Minimum-weight triangulation of the polygon P [n,3] (no new vertices). Weight of a triangulation = (largest
+    dihedral angle between neighbouring triangles, total area), compared in that order. outer[i] is the unit normal of
+    the existing face across rim edge (i, i+1), or None. forbidden: chords (as frozenset pairs) that the mesh already
+    has as edges elsewhere; using one would give that edge three faces. Returns triangles wound opposite to the
+    polygon order."""
+    n = len(P)
+    W, O, N = {}, {}, {}
+    for i in range(n - 1):
+        W[(i, i + 1)] = (0.0, 0.0)
+    for span in range(2, n):
+        for i in range(n - span):
+            j = i + span
+            best = None
+            for k in range(i + 1, j):
+                nv = np.cross(P[k] - P[i], P[j] - P[i])
+                area = 0.5 * float(np.linalg.norm(nv))
+                d = 0.0
+                for a, b in ((i, k), (k, j)):
+                    if b == a + 1:
+                        if outer[a] is not None:
+                            d = max(d, _angle(-nv, outer[a], True))
+                    else:
+                        d = max(d, _angle(nv, N[(a, b)]))
+                m = max(d, W[(i, k)][0], W[(k, j)][0])
+                total = area + W[(i, k)][1] + W[(k, j)][1]
+                key = (round(m / 3.0), total)  # dihedral quantised to 3 degrees so the area decides between near-ties
+                if best is None or key < best[0]:
+                    best = (key, k, m, total, nv)
+            _, k, m, total, nv = best
+            if span < n - 1 and frozenset((i, j)) in forbidden:
+                m, total = 1e9, 1e9
+            W[(i, j)], O[(i, j)], N[(i, j)] = (m, total), k, nv
+    tris, stack = [], [(0, n - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j == i + 1:
+            continue
+        k = O[(i, j)]
+        tris.append([i, j, k])  # (i, k, j) reversed
+        stack += [(i, k), (k, j)]
+    return tris
+
+
+def relax_edges(P, faces, rim_edges, forbidden=frozenset(), max_sweeps=30):
+    """Flip interior edges toward Delaunay (opposite angles summing to more than 180 degrees)."""
+    Pa = np.array(P)
+    for _ in range(max_sweeps):
+        emap = {}
+        for fi, f in enumerate(faces):
+            for t in range(3):
+                u, v, w = f[t], f[(t + 1) % 3], f[(t + 2) % 3]
+                emap.setdefault(frozenset((u, v)), []).append((fi, u, v, w))
+        existing, touched, flips = set(emap) | forbidden, set(), 0
+        for e, lst in emap.items():
+            if len(lst) != 2 or e in rim_edges:
+                continue
+            (f1, p, q, c1), (f2, u2, v2, c2) = lst
+            if (u2, v2) != (q, p) or f1 in touched or f2 in touched or frozenset((c1, c2)) in existing:
+                continue
+
+            def corner(c):
+                a, b = Pa[p] - Pa[c], Pa[q] - Pa[c]
+                return float(np.arccos(np.clip(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-20), -1.0, 1.0)))
+
+            if corner(c1) + corner(c2) <= np.pi + 1e-9:
+                continue
+            old = np.cross(Pa[q] - Pa[p], Pa[c1] - Pa[p])
+            n1 = np.cross(Pa[c2] - Pa[p], Pa[c1] - Pa[p])
+            n2 = np.cross(Pa[q] - Pa[c2], Pa[c1] - Pa[c2])
+            if n1 @ old <= 0 or n2 @ old <= 0:
+                continue  # the flip would fold the patch
+            faces[f1], faces[f2] = [p, c2, c1], [c2, q, c1]
+            touched |= {f1, f2}
+            existing.add(frozenset((c1, c2)))
+            flips += 1
+        if flips == 0:
+            break
+
+
+def fair_patch(P, faces, n_rim):
+    """Move the interior vertices (index >= n_rim) to minimise the thin-plate energy with the rim fixed;
+    falls back to a membrane (Laplacian) solve if that gives wild positions."""
+    Pa = np.array(P)
+    m = len(Pa) - n_rim
+    if m <= 0:
+        return Pa
+    rows, cols = [], []
+    for f in faces:
+        for t in range(3):
+            rows += [f[t], f[(t + 1) % 3]]
+            cols += [f[(t + 1) % 3], f[t]]
+    A = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(len(Pa), len(Pa))).tocsr()
+    A.data[:] = 1.0
+    L = sp.identity(len(Pa)) - sp.diags(1.0 / np.maximum(np.asarray(A.sum(1)).ravel(), 1.0)) @ A
+    interior, rim = np.arange(n_rim, len(Pa)), np.arange(n_rim)
+    scale = np.linalg.norm(Pa[rim].max(0) - Pa[rim].min(0))
+    for order in (2, 1):
+        M = (L @ L).tocsr() if order == 2 else L.tocsr()
+        try:
+            X = spla.spsolve(M[interior][:, interior].tocsc(), -(M[interior][:, rim] @ Pa[rim]))
+        except Exception:
+            continue
+        X = np.asarray(X).reshape(m, 3)
+        if np.isfinite(X).all() and np.abs(X - Pa[rim].mean(0)).max() <= 3.0 * max(scale, 1e-12):
+            Pa[interior] = X
+            break
+    return Pa
+
+
+def fill_hole_liepa(V, loop, outer, mesh_edges=frozenset(), max_new=2000):
+    """Fill one hole. loop: ordered rim vertex ids; outer: unit normal of the face across each rim edge (or None).
+    Returns (new vertex positions [m,3], faces in local indices: 0..n-1 rim, n.. new) wound opposite to the loop order."""
+    n = len(loop)
+    P0 = V[np.asarray(loop)]
+    if n == 3:
+        return np.zeros((0, 3)), [[0, 2, 1]]
+    nv = len(V)
+    forbidden = {frozenset((a, b)) for a in range(n) for b in range(a + 2, n)
+                 if not (a == 0 and b == n - 1) and min(loop[a], loop[b]) * nv + max(loop[a], loop[b]) in mesh_edges}
+    faces = triangulate_min_weight(P0, outer, forbidden)
+    P = list(P0)
+    rim_len = [float(np.linalg.norm(P0[(i + 1) % n] - P0[i])) for i in range(n)]
+    sigma = [0.5 * (rim_len[i - 1] + rim_len[i]) for i in range(n)]
+    rim_edges = {frozenset((i, (i + 1) % n)) for i in range(n)}
+    relax_edges(P, faces, rim_edges, forbidden)
+    for _ in range(25):
+        Pa, out, changed = np.array(P), [], False
+        for f in faces:
+            g = Pa[f].mean(0)
+            sg = (sigma[f[0]] + sigma[f[1]] + sigma[f[2]]) / 3.0
+            d = [float(np.linalg.norm(g - Pa[x])) for x in f]
+            if len(P) - n < max_new and all(ALPHA * d[t] > sg and ALPHA * d[t] > sigma[f[t]] for t in range(3)):
+                gi = len(P)
+                P.append(g)
+                sigma.append(sg)
+                a, b, c = f
+                out += [[a, b, gi], [b, c, gi], [c, a, gi]]
+                changed = True
+            else:
+                out.append(f)
+        faces = out
+        if not changed:
+            break
+        relax_edges(P, faces, rim_edges, forbidden)
+    Pa = fair_patch(P, faces, n)
+    return Pa[n:], faces
+
+
 def order_cycle(H, cycle):
     """Vertices of a simple cycle (given as a node list from the cycle basis) in walking order."""
     nodes = set(cycle)
@@ -184,6 +355,8 @@ def main():
     parser.add_argument("--through_nonmanifold", action="store_true", help="let hole rims run along non-manifold edges (needed: every open boundary chain ends on one)")
     parser.add_argument("--min_boundary_share", type=float, default=0.5, help="with --through_nonmanifold: share of a rim that must be real boundary edges")
     parser.add_argument("--fix_nonmanifold", action="store_true", help="first drop the extra faces at edges shared by 3+ faces (keeps the two that continue each other best); removes real geometry, report says how much")
+    parser.add_argument("--fill_method", choices=["fan", "liepa"], default="fan",
+                        help="fan: one new vertex at the centroid; liepa: minimum-weight triangulation, refinement to the local edge length, thin-plate fairing")
     parser.add_argument("--debug_ply", default=None, help="also write the filled mesh with the new faces in red")
     args = parser.parse_args()
 
@@ -208,6 +381,16 @@ def main():
         cycles, directed, stats, n_b = find_holes(V, F, args.max_loop_edges, args.max_extent, mode, args.min_boundary_share)
         n_boundary = n_b if n_boundary is None else n_boundary
         new_v, new_c, new_f = [], [], []
+        if args.fill_method == "liepa":
+            # normal of an existing face on each boundary edge, for the dihedral weights
+            ends = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+            ekey = np.sort(ends, axis=1)
+            ekey = ekey[:, 0].astype(np.int64) * len(V) + ekey[:, 1]
+            _, first = np.unique(ekey, return_index=True)
+            face_n = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+            face_n /= np.maximum(np.linalg.norm(face_n, axis=1), 1e-20)[:, None]
+            edge_normal = {int(k): face_n[i // 3] for k, i in zip(ekey[first], first)}
+            mesh_edges = set(int(k) for k in ekey[first])
         for cyc in cycles:
             loop = np.asarray(cyc)
             n = len(loop)
@@ -216,6 +399,21 @@ def main():
             backward = sum((int(loop[(i + 1) % n]), int(loop[i])) in directed for i in range(n))
             if forward < backward:
                 loop = loop[::-1]
+            if args.fill_method == "liepa":
+                outer = []
+                for i in range(n):
+                    a, b = int(loop[i]), int(loop[(i + 1) % n])
+                    outer.append(edge_normal.get(min(a, b) * len(V) + max(a, b)))
+                inner_v, local_f = fill_hole_liepa(V, loop, outer, mesh_edges)
+                base = len(V) + len(new_v)
+                # new vertices: inverse-distance weighted mean of the rim colours
+                for p in inner_v:
+                    w = 1.0 / np.maximum(np.linalg.norm(V[loop] - p, axis=1), 1e-9)
+                    new_c.append((C[loop] * w[:, None]).sum(0) / w.sum())
+                    new_v.append(p)
+                for f in local_f:
+                    new_f.append([int(loop[x]) if x < n else base + (x - n) for x in f])
+                continue
             if n == 3:
                 new_f.append([loop[1], loop[0], loop[2]])
                 continue
