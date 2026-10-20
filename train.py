@@ -108,6 +108,7 @@ def training(
     triangles.size_probs_zero = opt.size_probs_zero
     triangles.size_probs_zero_image_space = opt.size_probs_zero_image_space
     triangles.no_mesh_densify = opt.no_mesh_densify
+    triangles.free_max_triangles = opt.free_max_triangles
 
     use_mesh_reg = opt.lambda_laplacian > 0 or opt.lambda_normal_consistency > 0 or opt.lambda_tangential_laplacian > 0
     if (opt.normal_only_motion or opt.lambda_tangential_laplacian > 0) and triangles._anchor is None:
@@ -216,6 +217,15 @@ def training(
 
         normal_error = (1 - (rend_normal * gt_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
+
+        # depth loss: relative L1 against the dense depth prior (scene units), on pixels the mesh covers
+        depth_loss = torch.zeros((), device="cuda")
+        if opt.lambda_depth > 0 and iteration >= opt.depth_from and viewpoint_cam.depth_map is not None:
+            prior = viewpoint_cam.depth_map.cuda()
+            rend_depth = render_pkg["surf_depth"]
+            valid = (render_pkg["rend_alpha"] > 0.5) & (prior > 0) & (rend_depth > 0)
+            if valid.any():
+                depth_loss = opt.lambda_depth * ((rend_depth - prior).abs() / prior)[valid].mean()
         
         if iteration < opt.start_opacity_floor:
             loss_weight = triangles.get_vertex_weight[triangles._triangle_indices].mean() * lambda_weight
@@ -242,7 +252,7 @@ def training(
                 reg_loss = reg_loss + opt.lambda_edge_smooth * edge_aware_smoothness(rend_normal, gt_image, opt.edge_alpha)
 
         # FINAL LOSS
-        loss = loss_image + loss_weight + normal_loss + reg_loss  # + depth_loss
+        loss = loss_image + loss_weight + normal_loss + reg_loss + depth_loss
 
         loss.backward()
         if opt.mesh_refine and iteration < opt.refine_until:
@@ -273,6 +283,8 @@ def training(
                 topology = None # pruning/densification below changes the mesh connectivity
 
                 print(torch.min(triangles.importance_score))
+                if opt.lambda_depth > 0 and iteration >= opt.depth_from:
+                    print("[ITER {}] depth loss {:.5f}".format(iteration, float(depth_loss)))
 
                 # --- Build condition masks (all mean "DELETE") ---
                 triangle_vertex_weights = triangles.get_vertex_weight[triangles._triangle_indices]  # [T,3,1]
@@ -333,6 +345,8 @@ def training(
                             probs_opacity = False
 
                     triangles.add_new_gs(iteration, cap_max=opt.max_points, splitt_large_triangles=splitt_large_triangles, probs_opacity=probs_opacity)
+                    if triangles._vertex_is_mesh is not None:
+                        print("[ITER {}] free triangles: {}".format(iteration, int((~triangles.triangle_is_mesh()).sum().item())))
    
 
                 if (opt.mesh_refine and opt.refine_from <= iteration <= opt.refine_until

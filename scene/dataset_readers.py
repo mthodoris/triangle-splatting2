@@ -89,7 +89,7 @@ def resize_to_multiple(tensor, multiple=28):
     new_W = (W // multiple) * multiple
     return torch.nn.functional.interpolate(tensor, size=(new_H, new_W), mode='bilinear', align_corners=False)
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, depth_dir=""):
     # Model to extract normal map
     model = torch.hub.load('yvanyin/metric3d', 'metric3d_vit_large', pretrain=True)
     model.eval().cuda()
@@ -191,8 +191,16 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             # Store float version in [-1, 1]
             normal = normals
 
+        depth_map = None
+        if depth_dir:
+            depth_path = os.path.join(depth_dir, image_name + "_depth.npy")
+            if os.path.exists(depth_path):
+                # dense depth prior aligned to the SfM scale; nearest keeps depths from mixing across object edges
+                depth = np.load(depth_path).astype(np.float32)
+                depth_map = cv2.resize(depth, (image.size[0], image.size[1]), interpolation=cv2.INTER_NEAREST)[..., None]
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height, normal_map=normal, depth_map=None)
+                              image_path=image_path, image_name=image_name, width=width, height=height, normal_map=normal, depth_map=depth_map)
         cam_infos.append(cam_info)
     del model
     torch.cuda.empty_cache()
@@ -225,7 +233,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
+def readColmapSceneInfo(path, images, eval, llffhold=8, depth_dir=""):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -238,7 +246,8 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir),
+                                              depth_dir=os.path.join(path, depth_dir) if depth_dir else "")
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:

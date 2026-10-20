@@ -86,6 +86,7 @@ class TriangleModel:
         # (and everyone's, without groups).
         self._vertex_is_mesh = None
         self.free_opacity_floor = None
+        self.free_max_triangles = 0 # >0: the free group never grows beyond this many triangles
         self.no_mesh_densify = False # never split mesh-group triangles (keeps the init topology)
 
         # Per-face texture (--tex_res): a residual RGB colour on a barycentric lattice of level tex_res inside
@@ -1017,6 +1018,12 @@ class TriangleModel:
 
         # 3) combine and deduplicate
         add_idx = torch.unique(torch.cat([rand_idx, top_idx.to(rand_idx.device)]), sorted=False)
+        if self.free_max_triangles > 0 and self.no_mesh_densify:
+            # every split replaces one free triangle by four (net +3); stop at the cap
+            room = (self.free_max_triangles - int((~self.triangle_is_mesh()).sum().item())) // 3
+            if room <= 0:
+                return 0
+            add_idx = add_idx[:room]
 
         (new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_anchor, new_anchor_normal) = self._update_params_fast(add_idx, iteration)
 

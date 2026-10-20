@@ -65,6 +65,7 @@ class ModelParams(ParamGroup):
         self.eval = False
         self.mesh_path = ""
         self.free_triangles = False # with --mesh_path: add free triangles from SfM points away from the mesh
+        self.depth_dir = "" # folder under the source path with dense depth priors in scene units (garden: pseudo_depth, files <image>_depth.npy); empty = not loaded
         self.free_min_dist = 3.0 # SfM points farther than this many init mean edges from the mesh seed free triangles
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -161,6 +162,9 @@ class OptimizationParams(ParamGroup):
         self.refine_fraction = 0.05 # share of mesh triangles selected per refinement step
         self.refine_min_edge = 0.3 # do not split triangles whose longest edge is below this many init mean edges
         self.mesh_max_vertices = 4000000
+        self.lambda_depth = 0.0 # weight of the relative L1 depth loss against the --depth_dir prior, on pixels the mesh covers
+        self.depth_from = 5000 # iteration from which the depth loss is used
+        self.free_max_triangles = 0 # >0: the free group never grows beyond this many triangles (needs --no_mesh_densify)
         self.refine_catmull_clark = False # selected triangles get one Catmull-Clark step (edge points + face point, 6 children) instead of a longest-edge split; old vertices stay fixed
         self.refine_cc_move_old = False # with --refine_catmull_clark: also move the corners of selected triangles to their Catmull-Clark positions (surface smooths/shrinks)
         self.refine_geo_angle = 0.0 # >0 (degrees): only split triangles whose largest angle to an edge-neighbour reaches this, i.e. curved places; flat areas stay coarse
