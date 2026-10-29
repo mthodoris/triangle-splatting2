@@ -26,6 +26,7 @@ from triangle_renderer import render
 from utils.large_steps import LargeSteps
 from utils.voronoi_handles import VoronoiHandles, farthest_point_seeds
 from utils.voronoi_video import make_video
+from utils.sfm_attraction import SfmAttraction
 import sys
 from scene import Scene, TriangleModel
 from utils.general_utils import safe_state
@@ -203,6 +204,13 @@ def training(
             vor.num_seeds, vor.num_vertices, opt.vor_blend, ", normal-only" if opt.vor_normal_only else ""))
         if opt.vor_frames_interval > 0:
             save_frame(vor, 0)
+    sfm = None
+    if opt.lambda_sfm > 0:
+        if triangles._anchor is None:
+            raise ValueError("--lambda_sfm needs --mesh_path")
+        sfm = SfmAttraction(os.path.join(dataset.source_path, "sparse/0/points3D.bin"), opt.sfm_max_error, opt.sfm_max_dist)
+        print("SfM attraction: {} of {} SfM points with reprojection error < {}, lambda {}".format(
+            sfm.points.shape[0], sfm.num_loaded, opt.sfm_max_error, opt.lambda_sfm))
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -288,6 +296,19 @@ def training(
             if valid.any():
                 depth_loss = opt.lambda_depth * ((rend_depth - prior).abs() / prior)[valid].mean()
         
+        # SfM attraction: point-to-plane pull of the nearest mesh vertex toward each SfM point
+        sfm_loss = torch.zeros((), device="cuda")
+        if sfm is not None and iteration >= opt.sfm_from:
+            if iteration % 500 == 1 or triangles.vertices.shape[0] != sfm.num_vertices:
+                # the 500-iteration block (refinement, pruning) renumbers the vertices
+                n_pairs = sfm.assign(triangles.vertices, mesh_vertex_index(),
+                                     triangles._triangle_indices[triangles.triangle_is_mesh()], triangles.init_edge)
+                if iteration % 500 == 1:
+                    r = sfm.residual(triangles.vertices.detach()).abs()
+                    print("[ITER {}] SfM attraction: {} points within {} edges, |offset| median {:.3f} p90 {:.3f} edges".format(
+                        iteration, n_pairs, opt.sfm_max_dist, float(r.median()), float(r.quantile(0.9))))
+            sfm_loss = opt.lambda_sfm * sfm.loss(triangles.vertices)
+
         if iteration < opt.start_opacity_floor:
             loss_weight = triangles.get_vertex_weight[triangles._triangle_indices].mean() * lambda_weight
         else:
@@ -313,7 +334,7 @@ def training(
                 reg_loss = reg_loss + opt.lambda_edge_smooth * edge_aware_smoothness(rend_normal, gt_image, opt.edge_alpha)
 
         # FINAL LOSS
-        loss = loss_image + loss_weight + normal_loss + reg_loss + depth_loss
+        loss = loss_image + loss_weight + normal_loss + reg_loss + depth_loss + sfm_loss
 
         loss.backward()
         if opt.mesh_refine and iteration < opt.refine_until:

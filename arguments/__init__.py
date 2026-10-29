@@ -183,6 +183,10 @@ class OptimizationParams(ParamGroup):
         self.vor_normal_only = False # each seed moves only along its surface normal (one scalar per seed): cells cannot slide
         self.vor_frames_interval = 0 # >0: every this many iterations save a progress frame (render | cells | motion from init) of one test view; video at the end
         self.vor_frames_camera = 0 # index of the test camera used for the frames
+        self.lambda_sfm = 0.0 # >0: each SfM point (<source>/sparse/0/points3D.bin) pulls its nearest mesh vertex along the vertex normal (Charbonnier on the offset in init edges)
+        self.sfm_max_error = 1.5 # only SfM points with a reprojection error below this (pixels)
+        self.sfm_max_dist = 2.0 # only SfM points within this many init mean edges of the mesh
+        self.sfm_from = 0 # iteration from which the SfM attraction is used
 
         self.sigma_start = 0
 
