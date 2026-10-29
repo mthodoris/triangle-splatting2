@@ -153,7 +153,7 @@ def training(
         local = torch.full((triangles.vertices.shape[0],), -1, dtype=torch.long, device="cuda")
         local[idx] = torch.arange(idx.numel(), device="cuda")
         faces = local[triangles._triangle_indices[triangles.triangle_is_mesh()].long()]
-        return VoronoiHandles(triangles.vertices.detach()[idx], faces, seeds, opt.vor_blend), idx
+        return VoronoiHandles(triangles.vertices.detach()[idx], faces, seeds, opt.vor_blend, opt.vor_normal_only), idx
 
     def save_cells(vor, iteration):
         import trimesh
@@ -199,7 +199,8 @@ def training(
         x_mesh = triangles.vertices.detach()[mesh_vertex_index()]
         vor, vor_idx = build_voronoi(farthest_point_seeds(x_mesh, opt.vor_init_seeds))
         save_cells(vor, 0)
-        print("Voronoi handles: {} seeds on {} mesh vertices, {} blending".format(vor.num_seeds, vor.num_vertices, opt.vor_blend))
+        print("Voronoi handles: {} seeds on {} mesh vertices, {} blending{}".format(
+            vor.num_seeds, vor.num_vertices, opt.vor_blend, ", normal-only" if opt.vor_normal_only else ""))
         if opt.vor_frames_interval > 0:
             save_frame(vor, 0)
     topology = None # edge connectivity, rebuilt after every prune/densify step

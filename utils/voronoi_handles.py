@@ -8,7 +8,8 @@
 # hard: w_vs = 1 for the vertex's own seed (each cell moves rigidly);
 # soft: Gaussian falloff over the own seed and the seeds of neighbouring cells (cells touching along a mesh
 #       edge), width = the cell's mean vertex-to-seed distance, normalized to sum 1.
-# The seed gradient is W^T g (g: vertex gradients) and d is updated with Adam. A round (new_seeds, then a new
+# The seed gradient is W^T g (g: vertex gradients) and d is updated with Adam. normal_only: d_s = t_s n_s with n_s the
+# seed's area-weighted vertex normal at x0 and Adam on the scalar t_s (cells move in and out, never slide). A round (new_seeds, then a new
 # VoronoiHandles from the current positions) bakes the deformation into x0, so the mesh does not jump.
 # Same interface as utils/large_steps.py: step() writes the mesh rows and zeroes their gradient.
 #
@@ -62,7 +63,7 @@ def cover_components(graph, seeds):
 
 
 class VoronoiHandles:
-    def __init__(self, vertices, faces, seeds, blend="soft", betas=(0.9, 0.999), eps=1e-15):
+    def __init__(self, vertices, faces, seeds, blend="soft", normal_only=False, betas=(0.9, 0.999), eps=1e-15):
         """vertices: [V,3] current mesh positions (they become x0); faces: [F,3] mesh-local indices;
         seeds: vertex indices (tensor or array). Components without a seed get one."""
         dev = vertices.device
@@ -107,8 +108,16 @@ class VoronoiHandles:
         self.rows, self.cols, self.w = rows, cols, w[:, None]
 
         self.delta = torch.zeros(S, 3, device=dev)
-        self.m1 = torch.zeros_like(self.delta)
-        self.m2 = torch.zeros_like(self.delta)
+        self.normal_only = normal_only
+        if normal_only:
+            fn = torch.cross(self.x0[self.faces[:, 1]] - self.x0[self.faces[:, 0]], self.x0[self.faces[:, 2]] - self.x0[self.faces[:, 0]], dim=1)
+            vn = torch.zeros_like(self.x0)
+            for k in range(3):
+                vn.index_add_(0, self.faces[:, k], fn)
+            self.seed_normal = torch.nn.functional.normalize(vn[self.seeds], dim=1)
+            self.t = torch.zeros(S, 1, device=dev)
+        self.m1 = torch.zeros(S, 1 if normal_only else 3, device=dev)
+        self.m2 = torch.zeros_like(self.m1)
         self.b1, self.b2 = betas
         self.eps = eps
         self.step_count = 0
@@ -129,12 +138,18 @@ class VoronoiHandles:
             return  # densification replaced the parameter after backward: no gradient this step
         g = vertices.grad[idx]
         g_seed = torch.zeros_like(self.delta).index_add_(0, self.cols, self.w * g[self.rows])
+        if self.normal_only:
+            g_seed = (g_seed * self.seed_normal).sum(1, keepdim=True)
         self.step_count += 1
         self.m1.mul_(self.b1).add_(g_seed, alpha=1 - self.b1)
         self.m2.mul_(self.b2).addcmul_(g_seed, g_seed, value=1 - self.b2)
         m1 = self.m1 / (1 - self.b1 ** self.step_count)
         m2 = self.m2 / (1 - self.b2 ** self.step_count)
-        self.delta -= lr * m1 / (m2.sqrt() + self.eps)
+        if self.normal_only:
+            self.t -= lr * m1 / (m2.sqrt() + self.eps)
+            self.delta = self.t * self.seed_normal
+        else:
+            self.delta -= lr * m1 / (m2.sqrt() + self.eps)
         vertices.data[idx] = self.positions()
         vertices.grad[idx] = 0
 
