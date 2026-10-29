@@ -181,3 +181,13 @@ class VoronoiHandles:
         g = torch.Generator().manual_seed(0)
         palette = torch.randint(40, 256, (self.num_seeds, 3), generator=g, dtype=torch.uint8)
         return palette[self.label.cpu()].numpy()
+
+    def cell_viz_colors(self):
+        """Float [V,3] colors in [0,1] for rendering the cells: the cell color, hashed from the seed's vertex index,
+        so a cell keeps its color across rounds and a split shows as new colors appearing inside it. No border or
+        seed marks: colors are interpolated over each triangle, and once cells are a few vertices wide the marks
+        would cover everything."""
+        s = self.seeds[self.label]  # own seed's vertex index
+        h = (s * 2654435761) % (2 ** 32)
+        rgb = torch.stack([(h >> 0) & 255, (h >> 8) & 255, (h >> 16) & 255], 1).float() / 255.0
+        return 0.2 + 0.8 * rgb

@@ -180,6 +180,8 @@ class OptimizationParams(ParamGroup):
         self.vor_growth = 2.0 # seeds are multiplied by this at every round
         self.vor_max_fraction = 0.5 # no more seeds than this share of the mesh vertices
         self.vor_lr_mult = 1.0 # seed learning rate as a multiple of the vertex lr schedule
+        self.vor_frames_interval = 0 # >0: every this many iterations save a progress frame (render | cells | motion from init) of one test view; video at the end
+        self.vor_frames_camera = 0 # index of the test camera used for the frames
 
         self.sigma_start = 0
 

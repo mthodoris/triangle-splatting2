@@ -25,6 +25,7 @@ from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, lapla
 from triangle_renderer import render
 from utils.large_steps import LargeSteps
 from utils.voronoi_handles import VoronoiHandles, farthest_point_seeds
+from utils.voronoi_video import make_video
 import sys
 from scene import Scene, TriangleModel
 from utils.general_utils import safe_state
@@ -160,12 +161,47 @@ def training(
         trimesh.Trimesh(vor.x0.cpu().numpy(), vor.faces.cpu().numpy(), vertex_colors=vor.cell_colors(), process=False).export(
             os.path.join(scene.model_path, "voronoi", "cells_{:05d}.ply".format(iteration)))
 
+    frames_dir = os.path.join(scene.model_path, "voronoi", "frames")
+
+    @torch.no_grad()
+    def save_frame(vor, iteration):
+        # one test view, three panels: the render | Voronoi cells (one color per cell) | distance moved from the
+        # init surface (turbo colormap, 0 to 1 init mean edge); the free background group is drawn dark grey
+        import numpy as np, cv2
+        from matplotlib import colormaps
+        cams = scene.getTestCameras() or scene.getTrainCameras()
+        cam = cams[min(opt.vor_frames_camera, len(cams) - 1)]
+        idx = mesh_vertex_index()
+        n = triangles.vertices.shape[0]
+        panels = [render(cam, triangles, pipe, background)["render"]]
+        cells = torch.full((n, 3), 0.15, device="cuda")
+        cells[idx] = vor.cell_viz_colors()
+        panels.append(render(cam, triangles, pipe, background, override_color=cells)["render"])
+        motion = torch.full((n, 3), 0.15, device="cuda")
+        if triangles._anchor is not None and triangles._anchor.shape[0] == n:
+            d = ((triangles.vertices[idx] - triangles._anchor[idx]).norm(dim=1) / triangles.init_edge).clamp(0, 1)
+            motion[idx] = torch.from_numpy(colormaps["turbo"](d.cpu().numpy())[:, :3]).float().cuda()
+        panels.append(render(cam, triangles, pipe, background, override_color=motion)["render"])
+        img = torch.cat([p.clamp(0, 1) for p in panels], 2).permute(1, 2, 0).cpu().numpy()
+        img = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        h, w = img.shape[:2]
+        if w > 2400:
+            img = cv2.resize(img, (2400, round(h * 2400 / w)), interpolation=cv2.INTER_AREA)
+        bar = np.zeros((44, img.shape[1], 3), dtype=np.uint8)
+        text = "iter {:5d} | {} seeds | {} mesh vertices | render / Voronoi cells / moved from init (0-1 edge)".format(
+            iteration, vor.num_seeds, vor.num_vertices)
+        cv2.putText(bar, text, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+        os.makedirs(frames_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(frames_dir, "frame_{:05d}.jpg".format(iteration)), np.concatenate([bar, img], 0), [cv2.IMWRITE_JPEG_QUALITY, 90])
+
     vor, vor_idx = None, None
     if opt.voronoi_handles:
         x_mesh = triangles.vertices.detach()[mesh_vertex_index()]
         vor, vor_idx = build_voronoi(farthest_point_seeds(x_mesh, opt.vor_init_seeds))
         save_cells(vor, 0)
         print("Voronoi handles: {} seeds on {} mesh vertices, {} blending".format(vor.num_seeds, vor.num_vertices, opt.vor_blend))
+        if opt.vor_frames_interval > 0:
+            save_frame(vor, 0)
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -448,6 +484,8 @@ def training(
                 triangles.optimizer.zero_grad(set_to_none = True)
                 if opt.normal_only_motion:
                     triangles.project_to_anchor_normals(opt.max_normal_offset * triangles.init_edge)
+            if vor is not None and opt.vor_frames_interval > 0 and iteration % opt.vor_frames_interval == 0:
+                save_frame(vor, iteration)
 
 
     # cleaning of triangles that we do not need
@@ -478,6 +516,10 @@ def training(
 
     if opt.free_exclusion > 0 and triangles._vertex_is_mesh is not None:
         triangles.remove_free_near_mesh(opt.free_exclusion * triangles.init_edge)
+    if vor is not None and opt.vor_frames_interval > 0:
+        d = os.path.join(scene.model_path, "voronoi")
+        n = make_video(frames_dir, os.path.join(d, "progress.mp4"), os.path.join(d, "progress.gif"))
+        print("Voronoi progress video: {} frames -> {}".format(n, os.path.join(d, "progress.mp4 / progress.gif")))
     scene.save(iteration)
     mesh_file = scene.save_mesh(iteration)
     print("Saved mesh to {}".format(mesh_file))
