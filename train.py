@@ -377,6 +377,7 @@ def training(
                 if (vor is not None and opt.vor_add_from <= iteration <= opt.vor_add_until
                         and (iteration - opt.vor_add_from) % opt.vor_add_interval == 0):
                     # error per mesh vertex: the accumulated colour gradient (refinement resets it, so read it first)
+                    vor_idx = mesh_vertex_index()  # free-group pruning/densification above renumbered the vertices
                     cg = getattr(triangles, "_color_grad", None)
                     err = torch.zeros(vor.num_vertices, device="cuda")
                     if cg is not None and cg.shape[0] == triangles.vertices.shape[0]:
