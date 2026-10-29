@@ -24,6 +24,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, laplacian_loss, edge_aware_normal_consistency, edge_aware_smoothness, tangential_laplacian_loss
 from triangle_renderer import render
 from utils.large_steps import LargeSteps
+from utils.voronoi_handles import VoronoiHandles, farthest_point_seeds
 import sys
 from scene import Scene, TriangleModel
 from utils.general_utils import safe_state
@@ -116,6 +117,8 @@ def training(
 
     if (opt.large_steps or opt.mesh_refine) and (triangles._anchor is None or not opt.no_mesh_densify):
         raise ValueError("--large_steps and --mesh_refine need --mesh_path and --no_mesh_densify (the mesh only changes through --mesh_refine)")
+    if opt.voronoi_handles and (triangles._anchor is None or not opt.no_mesh_densify or opt.large_steps):
+        raise ValueError("--voronoi_handles needs --mesh_path and --no_mesh_densify, and replaces --large_steps")
 
     def mesh_vertex_index():
         if triangles._vertex_is_mesh is None:
@@ -142,6 +145,27 @@ def training(
         large_steps, mesh_idx = build_large_steps()
         print("Large steps on {} mesh vertices, lambda {}".format(mesh_idx.numel(), opt.ls_lambda))
     ls_residual = float("nan")
+
+    def build_voronoi(seeds):
+        # seeds: mesh-local vertex indices; the current positions become x0 (a new round bakes the deformation)
+        idx = mesh_vertex_index()
+        local = torch.full((triangles.vertices.shape[0],), -1, dtype=torch.long, device="cuda")
+        local[idx] = torch.arange(idx.numel(), device="cuda")
+        faces = local[triangles._triangle_indices[triangles.triangle_is_mesh()].long()]
+        return VoronoiHandles(triangles.vertices.detach()[idx], faces, seeds, opt.vor_blend), idx
+
+    def save_cells(vor, iteration):
+        import trimesh
+        os.makedirs(os.path.join(scene.model_path, "voronoi"), exist_ok=True)
+        trimesh.Trimesh(vor.x0.cpu().numpy(), vor.faces.cpu().numpy(), vertex_colors=vor.cell_colors(), process=False).export(
+            os.path.join(scene.model_path, "voronoi", "cells_{:05d}.ply".format(iteration)))
+
+    vor, vor_idx = None, None
+    if opt.voronoi_handles:
+        x_mesh = triangles.vertices.detach()[mesh_vertex_index()]
+        vor, vor_idx = build_voronoi(farthest_point_seeds(x_mesh, opt.vor_init_seeds))
+        save_cells(vor, 0)
+        print("Voronoi handles: {} seeds on {} mesh vertices, {} blending".format(vor.num_seeds, vor.num_vertices, opt.vor_blend))
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -349,6 +373,17 @@ def training(
                         print("[ITER {}] free triangles: {}".format(iteration, int((~triangles.triangle_is_mesh()).sum().item())))
    
 
+                vor_seeds = None
+                if (vor is not None and opt.vor_add_from <= iteration <= opt.vor_add_until
+                        and (iteration - opt.vor_add_from) % opt.vor_add_interval == 0):
+                    # error per mesh vertex: the accumulated colour gradient (refinement resets it, so read it first)
+                    cg = getattr(triangles, "_color_grad", None)
+                    err = torch.zeros(vor.num_vertices, device="cuda")
+                    if cg is not None and cg.shape[0] == triangles.vertices.shape[0]:
+                        err = (cg / triangles._color_grad_count.clamp(min=1))[vor_idx]
+                    target = min(int(vor.num_seeds * opt.vor_growth), int(opt.vor_max_fraction * vor.num_vertices))
+                    vor_seeds = vor.new_seeds(max(0, target - vor.num_seeds), err) if target > vor.num_seeds else vor.seeds
+
                 if (opt.mesh_refine and opt.refine_from <= iteration <= opt.refine_until
                         and iteration % opt.refine_interval == 0):
                     added = triangles.refine_mesh(opt.refine_fraction, opt.refine_min_edge * triangles.init_edge, opt.mesh_max_vertices,
@@ -358,6 +393,13 @@ def training(
                         iteration, added, num_mesh_v, int(triangles.triangle_is_mesh().sum().item())))
                     if added and large_steps is not None:
                         large_steps, mesh_idx = build_large_steps(ls_lambda_at(iteration))
+                    if added and vor is not None and vor_seeds is None:
+                        vor_seeds = vor.seeds  # new vertices: same seeds, cells recomputed
+
+                if vor_seeds is not None:
+                    vor, vor_idx = build_voronoi(vor_seeds)
+                    save_cells(vor, iteration)
+                    print("[ITER {}] voronoi handles: {} seeds on {} mesh vertices".format(iteration, vor.num_seeds, vor.num_vertices))
 
                 if large_steps is not None and opt.ls_lambda_final > 0 and iteration % 1000 == 0 and iteration <= opt.ls_lambda_until:
                     lam = ls_lambda_at(iteration)
@@ -396,6 +438,11 @@ def training(
                         ls_residual = residual
                     if iteration % 1000 == 0:
                         print("[ITER {}] large steps: CG relative residual {:.2e}".format(iteration, ls_residual))
+                if vor is not None:
+                    vertex_lr = next(g["lr"] for g in triangles.optimizer.param_groups if g["name"] == "vertices")
+                    if vor_idx.numel() != vor.num_vertices or (iteration % 500 == 0):
+                        vor_idx = mesh_vertex_index()  # free-group pruning renumbers vertices
+                    vor.step(triangles.vertices, vertex_lr * opt.vor_lr_mult, vor_idx)
                 triangles.optimizer.step()
                 triangles.optimizer.zero_grad(set_to_none = True)
                 if opt.normal_only_motion:

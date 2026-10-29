@@ -171,6 +171,15 @@ class OptimizationParams(ParamGroup):
         self.refine_view_fraction = 0.0 # >0: a triangle must reach --refine_min_inradius in at least this share of the views it is drawn in (0 = its best view only)
         self.refine_min_inradius = 0.0 # only split triangles whose largest on-screen inradius (render pixels) reaches this; the rasterizer skips triangles under 1 (0 = off)
         self.no_mesh_densify = False # never split mesh-group triangles: the mesh keeps the init topology (with --free_triangles only free triangles are split)
+        self.voronoi_handles = False # mesh vertices move through Voronoi seeds on the surface, coarse to fine (DESIGN_voronoi_seeds.md; needs --no_mesh_densify, not with --large_steps)
+        self.vor_init_seeds = 500 # seeds at the start (farthest-point sampling)
+        self.vor_blend = "soft" # hard: each cell moves rigidly; soft: Gaussian blend over the own and neighbouring cells' seeds
+        self.vor_add_from = 2000 # first round of new seeds
+        self.vor_add_interval = 2000 # multiple of 500
+        self.vor_add_until = 15000
+        self.vor_growth = 2.0 # seeds are multiplied by this at every round
+        self.vor_max_fraction = 0.5 # no more seeds than this share of the mesh vertices
+        self.vor_lr_mult = 1.0 # seed learning rate as a multiple of the vertex lr schedule
 
         self.sigma_start = 0
 
