@@ -10,11 +10,18 @@
 #   - Only patches on the mesh (alpha > 0.9) with some texture (gray std above min_std) are used.
 # Pixel convention as in the rasterizer: pixel i has ndc (2i + 1) / W - 1, so grid_sample (align_corners=False)
 # takes the ndc directly.
+# Coarse-to-fine (factor f > 1): both GT images are box-blurred over (2f - 1) pixels and the patch offsets are
+# spread f times wider, so a patch covers f times more of the image and its cost still falls when the surface is
+# several pixels off (the 7x7 patch at full resolution only sees errors of a few pixels).
+# After each call, self.last holds the 3D centers of the patches used and their costs (detached), so the caller can
+# record where the views disagree (--refine_by_mv).
 #
 
 import math
+import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.spatial import cKDTree
 
 
 def _gray(img):
@@ -43,12 +50,32 @@ class MultiViewConsistency:
         self.radius = r
         self.min_std = min_std
         self.gray = {}
+        self.last = None
+        self._tree, self._tree_n, self._tree_calls = None, -1, 0
 
-    def gray_of(self, cam):
-        g = self.gray.get(cam.image_name)
+    def gray_of(self, cam, factor=1):
+        key = (cam.image_name, factor)
+        g = self.gray.get(key)
         if g is None:
-            g = self.gray[cam.image_name] = _gray(cam.original_image.cuda())
+            g = _gray(cam.original_image.cuda())
+            if factor > 1:
+                g = F.avg_pool2d(g, 2 * factor - 1, stride=1, padding=factor - 1, count_include_pad=False)
+            self.gray[key] = g
         return g
+
+    @torch.no_grad()
+    def nearest_vertex(self, points, vertices, mesh_idx, max_dist):
+        """Index (into vertices) of the mesh vertex nearest to each point, -1 beyond max_dist. The KD-tree is
+        rebuilt every 100 calls and whenever the vertex set changes."""
+        self._tree_calls += 1
+        if self._tree is None or self._tree_n != vertices.shape[0] or self._tree_calls % 100 == 0:
+            self._tree = cKDTree(vertices.detach()[mesh_idx].cpu().numpy())
+            self._tree_n = vertices.shape[0]
+            self._tree_idx = mesh_idx
+        d, j = self._tree.query(points.cpu().numpy())
+        out = self._tree_idx[torch.from_numpy(j).cuda()]
+        out[torch.from_numpy(d > max_dist).cuda()] = -1
+        return out
 
     @staticmethod
     def _ncc(a, b, eps=1e-4):
@@ -56,24 +83,25 @@ class MultiViewConsistency:
         b = b - b.mean(-1, keepdim=True)
         return (a * b).sum(-1) / torch.sqrt((a * a).sum(-1) * (b * b).sum(-1) + eps)
 
-    def loss(self, cam, depth, alpha):
-        """cam: reference camera; depth, alpha: [1,H,W] rendered mesh depth (view z) and alpha. Returns
-        (loss, number of patches used)."""
+    def loss(self, cam, depth, alpha, factor=1):
+        """cam: reference camera; depth, alpha: [1,H,W] rendered mesh depth (view z) and alpha; factor: coarse-to-fine
+        blur/stride factor (1 = full resolution). Returns (loss, number of patches used)."""
+        self.last = None
         nbrs = self.neighbors.get(cam.image_name, [])
         zero = depth.sum() * 0
         if not nbrs:
             return zero, 0
         H, W = depth.shape[-2:]
-        r = self.radius
-        ref = self.gray_of(cam)
+        r = self.radius * factor
+        ref = self.gray_of(cam, factor)
         # patch centers on the mesh, away from the border
         ok = alpha[0, r:H - r, r:W - r] > 0.9
         cand = torch.nonzero(ok, as_tuple=False)
         if cand.shape[0] == 0:
             return zero, 0
         cand = cand[torch.randint(0, cand.shape[0], (self.num_patches,), device="cuda")] + r  # [N,2] (y, x)
-        px = cand[:, None, 1] + self.offsets[None, :, 0]  # [N,P]
-        py = cand[:, None, 0] + self.offsets[None, :, 1]
+        px = cand[:, None, 1] + factor * self.offsets[None, :, 0]  # [N,P]
+        py = cand[:, None, 0] + factor * self.offsets[None, :, 1]
         ref_patch = ref[0, 0, py, px]  # [N,P]
         textured = ref_patch.std(-1) > self.min_std
         z = depth[0, py, px]  # [N,P], differentiable
@@ -96,11 +124,13 @@ class MultiViewConsistency:
             gy = xn[..., 1] / (zn * math.tan(nb.FoVy * 0.5))
             inside = (zn > 0.01).all(-1) & (gx.abs() < 1).all(-1) & (gy.abs() < 1).all(-1)
             grid = torch.stack([gx, gy], -1)[None]  # [1,n,P,2]
-            nb_patch = F.grid_sample(self.gray_of(nb), grid, mode="bilinear", padding_mode="border", align_corners=False)[0, 0]
+            nb_patch = F.grid_sample(self.gray_of(nb, factor), grid, mode="bilinear", padding_mode="border", align_corners=False)[0, 0]
             cost = (1 - self._ncc(ref_patch, nb_patch)).clamp(0, 2)
             costs.append(torch.where(inside, cost, torch.full_like(cost, float("inf"))))
         best = torch.stack(costs, 0).min(0).values
         seen = torch.isfinite(best)
         if not seen.any():
             return zero, 0
+        center = self.offsets.shape[0] // 2  # offset (0, 0)
+        self.last = (xw[seen, center, :3].detach(), best[seen].detach())
         return best[seen].mean(), int(seen.sum())

@@ -1079,6 +1079,18 @@ class TriangleModel:
         self._color_grad_count += (norm > 0).float()
 
     @torch.no_grad()
+    def accumulate_vertex_score(self, idx, values):
+        """Add per-vertex values (e.g. the multi-view mismatch near each vertex, --refine_by_mv) to the same running
+        sums as accumulate_color_grad, so refine_mesh and the Voronoi seed rounds use them as the error."""
+        n = self.vertices.shape[0]
+        if getattr(self, "_color_grad", None) is None or self._color_grad.shape[0] != n:
+            self._color_grad = torch.zeros(n, device="cuda")
+            self._color_grad_count = torch.zeros(n, device="cuda")
+        keep = idx >= 0
+        self._color_grad.index_add_(0, idx[keep], values[keep].float())
+        self._color_grad_count.index_add_(0, idx[keep], torch.ones_like(values[keep], dtype=torch.float))
+
+    @torch.no_grad()
     def accumulate_inradius(self, camera, radii, render_scaling, min_inradius=0.0):
         """Keep, per triangle, the largest on-screen inradius (in render pixels) over the views it was drawn in.
         The rasterizer skips triangles whose inradius is below 1 render pixel, so refinement uses this to only

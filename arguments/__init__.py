@@ -192,6 +192,9 @@ class OptimizationParams(ParamGroup):
         self.mv_neighbors = 4 # neighboring training views per view (nearest camera centers, view directions within --mv_max_angle)
         self.mv_max_angle = 45.0 # degrees
         self.mv_patches = 2048 # patches per iteration (7x7 pixels, dilation 2)
+        self.mv_coarse_factor = 1 # >1 (power of 2): coarse-to-fine multi-view loss; images blurred and patches spread this many times wider at --mv_from, halving at even steps until --mv_coarse_until, then full resolution
+        self.mv_coarse_until = 10000
+        self.refine_by_mv = False # with --lambda_mv: refinement (and the Voronoi seed rounds) use the multi-view mismatch near each vertex as the error instead of the color gradient
 
         self.sigma_start = 0
 

@@ -19,6 +19,7 @@
 #
 
 import os
+import math
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim, mesh_topology, crease_weights, laplacian_loss, edge_aware_normal_consistency, edge_aware_smoothness, tangential_laplacian_loss
@@ -216,10 +217,24 @@ def training(
     if opt.lambda_mv > 0:
         if triangles._anchor is None:
             raise ValueError("--lambda_mv needs --mesh_path")
+        if opt.mv_coarse_factor > 1 and (opt.mv_coarse_factor & (opt.mv_coarse_factor - 1)):
+            raise ValueError("--mv_coarse_factor must be a power of 2")
         mv = MultiViewConsistency(scene.getTrainCameras(), opt.mv_neighbors, opt.mv_max_angle, opt.mv_patches)
         n_nb = [len(v) for v in mv.neighbors.values()]
         print("Multi-view consistency: {} views, {:.1f} neighbors per view on average ({} without any), lambda {} from iteration {}".format(
             len(n_nb), sum(n_nb) / max(1, len(n_nb)), sum(1 for n in n_nb if n == 0), opt.lambda_mv, opt.mv_from))
+    if opt.refine_by_mv and (mv is None or not opt.mesh_refine):
+        raise ValueError("--refine_by_mv needs --lambda_mv and --mesh_refine")
+
+    def mv_factor_at(it):
+        # coarse-to-fine: --mv_coarse_factor at --mv_from, halving at even steps, 1 from --mv_coarse_until
+        f0 = opt.mv_coarse_factor
+        if f0 <= 1 or it >= opt.mv_coarse_until:
+            return 1
+        levels = int(round(math.log2(f0)))
+        step = max(1, (opt.mv_coarse_until - opt.mv_from) / levels)
+        return 2 ** max(0, levels - int((it - opt.mv_from) // step))
+
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -321,10 +336,14 @@ def training(
         # multi-view photometric consistency through the rendered mesh depth
         mv_loss = torch.zeros((), device="cuda")
         if mv is not None and iteration >= opt.mv_from:
-            mv_cost, mv_n = mv.loss(viewpoint_cam, render_pkg["surf_depth"], render_pkg["rend_alpha"])
+            mv_f = mv_factor_at(iteration)
+            mv_cost, mv_n = mv.loss(viewpoint_cam, render_pkg["surf_depth"], render_pkg["rend_alpha"], mv_f)
             mv_loss = opt.lambda_mv * mv_cost
             if iteration % 500 == 0:
-                print("[ITER {}] multi-view: 1 - NCC {:.4f} over {} patches".format(iteration, float(mv_cost), mv_n))
+                print("[ITER {}] multi-view: 1 - NCC {:.4f} over {} patches, coarse factor {}".format(iteration, float(mv_cost), mv_n, mv_f))
+            if opt.refine_by_mv and iteration < opt.refine_until and mv.last is not None:
+                v = mv.nearest_vertex(mv.last[0], triangles.vertices, mesh_vertex_index(), triangles.init_edge)
+                triangles.accumulate_vertex_score(v, mv.last[1])
 
         if iteration < opt.start_opacity_floor:
             loss_weight = triangles.get_vertex_weight[triangles._triangle_indices].mean() * lambda_weight
@@ -355,7 +374,8 @@ def training(
 
         loss.backward()
         if opt.mesh_refine and iteration < opt.refine_until:
-            triangles.accumulate_color_grad()
+            if not opt.refine_by_mv:
+                triangles.accumulate_color_grad()
             if opt.refine_min_inradius > 0:
                 triangles.accumulate_inradius(viewpoint_cam, render_pkg["radii"].detach(), triangles.scaling, opt.refine_min_inradius)
         iter_end.record()
