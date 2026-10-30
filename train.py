@@ -27,6 +27,7 @@ from utils.large_steps import LargeSteps
 from utils.voronoi_handles import VoronoiHandles, farthest_point_seeds
 from utils.voronoi_video import make_video
 from utils.sfm_attraction import SfmAttraction
+from utils.multiview_loss import MultiViewConsistency
 import sys
 from scene import Scene, TriangleModel
 from utils.general_utils import safe_state
@@ -211,6 +212,14 @@ def training(
         sfm = SfmAttraction(os.path.join(dataset.source_path, "sparse/0/points3D.bin"), opt.sfm_max_error, opt.sfm_max_dist)
         print("SfM attraction: {} of {} SfM points with reprojection error < {}, lambda {}".format(
             sfm.points.shape[0], sfm.num_loaded, opt.sfm_max_error, opt.lambda_sfm))
+    mv = None
+    if opt.lambda_mv > 0:
+        if triangles._anchor is None:
+            raise ValueError("--lambda_mv needs --mesh_path")
+        mv = MultiViewConsistency(scene.getTrainCameras(), opt.mv_neighbors, opt.mv_max_angle, opt.mv_patches)
+        n_nb = [len(v) for v in mv.neighbors.values()]
+        print("Multi-view consistency: {} views, {:.1f} neighbors per view on average ({} without any), lambda {} from iteration {}".format(
+            len(n_nb), sum(n_nb) / max(1, len(n_nb)), sum(1 for n in n_nb if n == 0), opt.lambda_mv, opt.mv_from))
     topology = None # edge connectivity, rebuilt after every prune/densify step
 
     for iteration in range(first_iter, opt.iterations + 1):
@@ -309,6 +318,14 @@ def training(
                         iteration, n_pairs, opt.sfm_max_dist, float(r.median()), float(r.quantile(0.9))))
             sfm_loss = opt.lambda_sfm * sfm.loss(triangles.vertices)
 
+        # multi-view photometric consistency through the rendered mesh depth
+        mv_loss = torch.zeros((), device="cuda")
+        if mv is not None and iteration >= opt.mv_from:
+            mv_cost, mv_n = mv.loss(viewpoint_cam, render_pkg["surf_depth"], render_pkg["rend_alpha"])
+            mv_loss = opt.lambda_mv * mv_cost
+            if iteration % 500 == 0:
+                print("[ITER {}] multi-view: 1 - NCC {:.4f} over {} patches".format(iteration, float(mv_cost), mv_n))
+
         if iteration < opt.start_opacity_floor:
             loss_weight = triangles.get_vertex_weight[triangles._triangle_indices].mean() * lambda_weight
         else:
@@ -334,7 +351,7 @@ def training(
                 reg_loss = reg_loss + opt.lambda_edge_smooth * edge_aware_smoothness(rend_normal, gt_image, opt.edge_alpha)
 
         # FINAL LOSS
-        loss = loss_image + loss_weight + normal_loss + reg_loss + depth_loss + sfm_loss
+        loss = loss_image + loss_weight + normal_loss + reg_loss + depth_loss + sfm_loss + mv_loss
 
         loss.backward()
         if opt.mesh_refine and iteration < opt.refine_until:

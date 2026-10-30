@@ -187,6 +187,11 @@ class OptimizationParams(ParamGroup):
         self.sfm_max_error = 1.5 # only SfM points with a reprojection error below this (pixels)
         self.sfm_max_dist = 2.0 # only SfM points within this many init mean edges of the mesh
         self.sfm_from = 0 # iteration from which the SfM attraction is used
+        self.lambda_mv = 0.0 # >0: multi-view photometric consistency: GT patches lifted with the rendered mesh depth must match (NCC) in neighboring training views
+        self.mv_from = 3000 # iteration from which the multi-view loss is used
+        self.mv_neighbors = 4 # neighboring training views per view (nearest camera centers, view directions within --mv_max_angle)
+        self.mv_max_angle = 45.0 # degrees
+        self.mv_patches = 2048 # patches per iteration (7x7 pixels, dilation 2)
 
         self.sigma_start = 0
 
