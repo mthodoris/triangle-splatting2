@@ -714,7 +714,7 @@ class TriangleModel:
 
     # Refinement accumulators (per triangle: inradius stats, per vertex: color-gradient sums) follow every
     # prune/append, so free-group pruning and densification do not reset them (--free_triangles with --mesh_refine).
-    _TRI_ACCUM = ("_max_inradius", "_inr_views", "_inr_views_ok")
+    _TRI_ACCUM = ("_max_inradius", "_inr_views", "_inr_views_ok", "_seen_views")
     _VERT_ACCUM = ("_color_grad", "_color_grad_count")
 
     def _select_accum(self, names, sel, old_n):
@@ -1091,6 +1091,28 @@ class TriangleModel:
         self._color_grad_count.index_add_(0, idx[keep], torch.ones_like(values[keep], dtype=torch.float))
 
     @torch.no_grad()
+    def accumulate_seen(self, radii):
+        """Count, per triangle, the training views it was drawn in (--mesh_carve only deletes faces the cameras see)."""
+        T = self._triangle_indices.shape[0]
+        if getattr(self, "_seen_views", None) is None or self._seen_views.shape[0] != T:
+            self._seen_views = torch.zeros(T, device="cuda")
+        self._seen_views += (radii > 0).float()
+
+    @torch.no_grad()
+    def carve_mesh(self, threshold, min_views):
+        """Delete mesh-group faces whose opacity (the lowest of the three vertex opacities, as the rasterizer
+        uses) fell below threshold and that were drawn in at least min_views training views. Vertices left
+        without a face are dropped by the next vertex pruning (which renumbers vertices). Returns the number of faces deleted."""
+        seen = getattr(self, "_seen_views", None)
+        if seen is None or seen.shape[0] != self._triangle_indices.shape[0]:
+            return 0
+        opacity = self.get_vertex_weight[self._triangle_indices.long()].min(dim=1).values.squeeze(-1)
+        carve = self.triangle_is_mesh() & (opacity < threshold) & (seen >= min_views)
+        n = int(carve.sum().item())
+        if n > 0:
+            self.prune_triangles(~carve)
+        return n
+
     def accumulate_inradius(self, camera, radii, render_scaling, min_inradius=0.0):
         """Keep, per triangle, the largest on-screen inradius (in render pixels) over the views it was drawn in.
         The rasterizer skips triangles whose inradius is below 1 render pixel, so refinement uses this to only

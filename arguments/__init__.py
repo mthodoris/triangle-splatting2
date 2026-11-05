@@ -195,6 +195,13 @@ class OptimizationParams(ParamGroup):
         self.mv_coarse_factor = 1 # >1 (power of 2): coarse-to-fine multi-view loss; images blurred and patches spread this many times wider at --mv_from, halving at even steps until --mv_coarse_until, then full resolution
         self.mv_coarse_until = 10000
         self.refine_by_mv = False # with --lambda_mv: refinement (and the Voronoi seed rounds) use the multi-view mismatch near each vertex as the error instead of the color gradient
+        self.freeze_mesh = False # mesh-group vertex positions never move (colors, opacity and the free group still train): measures what a fixed geometry can render
+        self.mesh_carve = False # mesh faces may be deleted: the mesh starts at --carve_init_opacity with no floor; every 500 its in [carve_from, carve_until] faces below --carve_threshold are deleted, then the floor ramps to --final_opacity (solid) by --final_opacity_iter
+        self.carve_from = 3000
+        self.carve_until = 18000
+        self.carve_threshold = 0.5 # face opacity (lowest of its three vertex opacities, as the rasterizer uses) below which a face is deleted
+        self.carve_min_views = 3 # only faces drawn in at least this many training views (since the start) can be deleted
+        self.carve_init_opacity = 0.9
 
         self.sigma_start = 0
 

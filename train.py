@@ -123,6 +123,15 @@ def training(
         raise ValueError("--large_steps and --mesh_refine need --mesh_path and --no_mesh_densify (the mesh only changes through --mesh_refine)")
     if opt.voronoi_handles and (triangles._anchor is None or not opt.no_mesh_densify or opt.large_steps):
         raise ValueError("--voronoi_handles needs --mesh_path and --no_mesh_densify, and replaces --large_steps")
+    if opt.freeze_mesh and (opt.voronoi_handles or opt.large_steps or opt.mesh_refine or opt.normal_only_motion):
+        raise ValueError("--freeze_mesh keeps the mesh geometry fixed: no --voronoi_handles, --large_steps, --mesh_refine or --normal_only_motion")
+    if opt.mesh_carve:
+        if triangles._anchor is None or not opt.no_mesh_densify or opt.mesh_floor_from_start or opt.carve_until >= opt.final_opacity_iter:
+            raise ValueError("--mesh_carve needs --mesh_path and --no_mesh_densify, replaces --mesh_floor_from_start, and needs --carve_until < --final_opacity_iter")
+        with torch.no_grad():
+            is_mesh = triangles._vertex_is_mesh if triangles._vertex_is_mesh is not None else torch.ones_like(triangles.vertex_weight[:, 0], dtype=torch.bool)
+            y = torch.full_like(triangles.vertex_weight[is_mesh], opt.carve_init_opacity)
+            triangles.vertex_weight.data[is_mesh] = triangles.inverse_opacity(y, triangles.opacity_floor)
 
     def mesh_vertex_index():
         if triangles._vertex_is_mesh is None:
@@ -378,6 +387,8 @@ def training(
                 triangles.accumulate_color_grad()
             if opt.refine_min_inradius > 0:
                 triangles.accumulate_inradius(viewpoint_cam, render_pkg["radii"].detach(), triangles.scaling, opt.refine_min_inradius)
+        if opt.mesh_carve and iteration <= opt.carve_until:
+            triangles.accumulate_seen(render_pkg["radii"].detach())
         iter_end.record()
         
         with torch.no_grad():
@@ -442,6 +453,10 @@ def training(
 
                     triangles._prune_vertices(vertex_mask)
 
+                if opt.mesh_carve and opt.carve_from <= iteration <= opt.carve_until:
+                    carved = triangles.carve_mesh(opt.carve_threshold, opt.carve_min_views)
+                    print("[ITER {}] carving: {} mesh faces deleted (opacity < {}, seen in >= {} views), {} mesh faces left".format(
+                        iteration, carved, opt.carve_threshold, opt.carve_min_views, int(triangles.triangle_is_mesh().sum().item())))
 
                 triangle_vertex_weights = triangles.get_vertex_weight[triangles._triangle_indices]  # [T,3,1]
                 min_weights = triangle_vertex_weights.min(dim=1).values
@@ -516,7 +531,12 @@ def training(
                     current_opacity = init_opacity + (final_opacity - init_opacity) * a
                     current_opacity = min(current_opacity, final_opacity)
                     current_free = min(init_opacity + (opt.free_final_opacity - init_opacity) * a, opt.free_final_opacity)
-                    triangles.update_min_weight(final_opacity if opt.mesh_floor_from_start else current_opacity, new_free_min_weight=current_free)
+                    mesh_floor = final_opacity if opt.mesh_floor_from_start else current_opacity
+                    if opt.mesh_carve:
+                        # no floor while carving, then a linear ramp to the solid floor by final_opacity_iter
+                        b = min(1.0, max(0.0, (iteration - opt.carve_until) / max(1, total_iters_opacity - opt.carve_until)))
+                        mesh_floor = final_opacity * b
+                    triangles.update_min_weight(mesh_floor, new_free_min_weight=current_free)
 
                     prune_triangles += 0.01 
 
@@ -539,6 +559,11 @@ def training(
                     if vor_idx.numel() != vor.num_vertices or (iteration % 500 == 0):
                         vor_idx = mesh_vertex_index()  # free-group pruning renumbers vertices
                     vor.step(triangles.vertices, vertex_lr * opt.vor_lr_mult, vor_idx)
+                if opt.freeze_mesh and triangles.vertices.grad is not None:
+                    if triangles._vertex_is_mesh is None:
+                        triangles.vertices.grad.zero_()
+                    else:
+                        triangles.vertices.grad.masked_fill_(triangles._vertex_is_mesh[:, None], 0.0)
                 triangles.optimizer.step()
                 triangles.optimizer.zero_grad(set_to_none = True)
                 if opt.normal_only_motion:
