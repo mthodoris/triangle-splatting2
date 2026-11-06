@@ -1310,6 +1310,68 @@ class TriangleModel:
         self._max_inradius = None
         return int(new_vertices.shape[0])
 
+    @torch.no_grad()
+    def remesh_mesh(self, target, max_faces, relax_lambda):
+        """One continuous-remeshing pass (utils/remesh.py) over the mesh group towards the per-vertex target edge
+        length `target` [mesh vertices, in mesh_vertex order]; the free group is untouched. Every new vertex's
+        parameters and Adam moments are the mean of its two source vertices (the same vertex twice when kept).
+        Afterwards the mesh vertices come first, then the free ones. Returns the pass statistics."""
+        from utils.remesh import remesh
+        assert self.tex_res == 0, "remeshing does not carry per-face texture"
+        V = self.vertices.detach()
+        F = self._triangle_indices.long()
+        if self._vertex_is_mesh is None:
+            mesh_v = torch.arange(V.shape[0], device=V.device)
+            free_v = mesh_v[:0]
+            is_mesh_tri = torch.ones(F.shape[0], dtype=torch.bool, device=V.device)
+        else:
+            mesh_v = torch.nonzero(self._vertex_is_mesh, as_tuple=True)[0]
+            free_v = torch.nonzero(~self._vertex_is_mesh, as_tuple=True)[0]
+            is_mesh_tri = self.triangle_is_mesh()
+        local = torch.full((V.shape[0],), -1, dtype=torch.long, device=V.device)
+        local[mesh_v] = torch.arange(mesh_v.numel(), device=V.device)
+        Vm, Fm, sa, sb, stats = remesh(V[mesh_v], local[F[is_mesh_tri]], target, max_faces, relax_lambda, self._REFINE_TEMPLATES)
+
+        nm = Vm.shape[0]
+        src_a = torch.cat([mesh_v[sa], free_v])
+        src_b = torch.cat([mesh_v[sb], free_v])
+        free_new = torch.full((V.shape[0],), -1, dtype=torch.long, device=V.device)
+        free_new[free_v] = nm + torch.arange(free_v.numel(), device=V.device)
+        F_free = free_new[F[~is_mesh_tri]]
+
+        opacity = self.get_vertex_weight.detach()
+        new_opacity = 0.5 * (opacity[src_a] + opacity[src_b])
+        positions = torch.cat([Vm, V[free_v]], 0)
+        for group in self.optimizer.param_groups:
+            if group["name"] not in ("vertices", "vertex_weight", "f_dc", "f_rest"):
+                continue
+            old = group["params"][0]
+            state = self.optimizer.state.pop(old, None)
+            new = positions if group["name"] == "vertices" else 0.5 * (old.detach()[src_a] + old.detach()[src_b])
+            group["params"][0] = nn.Parameter(new.contiguous().requires_grad_(True))
+            if state is not None:
+                state["exp_avg"] = 0.5 * (state["exp_avg"][src_a] + state["exp_avg"][src_b])
+                state["exp_avg_sq"] = 0.5 * (state["exp_avg_sq"][src_a] + state["exp_avg_sq"][src_b])
+                self.optimizer.state[group["params"][0]] = state
+            setattr(self, {"vertices": "vertices", "vertex_weight": "vertex_weight", "f_dc": "_features_dc", "f_rest": "_features_rest"}[group["name"]], group["params"][0])
+
+        if self._anchor is not None:
+            self._anchor = 0.5 * (self._anchor[src_a] + self._anchor[src_b])
+            n = self._anchor_normal[src_a] + self._anchor_normal[src_b]
+            self._anchor_normal = torch.nn.functional.normalize(torch.where(n.norm(dim=1, keepdim=True) > 1e-6, n, self._anchor_normal[src_a]), dim=1)
+        if self._vertex_is_mesh is not None:
+            self._vertex_is_mesh = self._vertex_is_mesh[src_a]
+        # opacity: the mean realized opacity of the sources under the vertex's own floor
+        self.vertex_weight.data.copy_(self.inverse_opacity(new_opacity, self.vertex_floor()))
+
+        self._triangle_indices = torch.cat([Fm, F_free], 0).to(torch.int32).contiguous()
+        for name in self._TRI_ACCUM + self._VERT_ACCUM:
+            setattr(self, name, None)
+        self.image_size = torch.zeros(self._triangle_indices.shape[0], dtype=torch.float, device="cuda")
+        self.importance_score = torch.zeros(self._triangle_indices.shape[0], dtype=torch.float, device="cuda")
+        stats["mesh_vertices"], stats["mesh_faces"] = nm, int(Fm.shape[0])
+        return stats
+
     def triangle_areas(self):
         tri = self.vertices[self._triangle_indices]                    # [T, 3, 3]
         AB  = tri[:, 1] - tri[:, 0]                                    # [T, 3]

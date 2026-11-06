@@ -29,6 +29,7 @@ from utils.voronoi_handles import VoronoiHandles, farthest_point_seeds
 from utils.voronoi_video import make_video
 from utils.sfm_attraction import SfmAttraction
 from utils.multiview_loss import MultiViewConsistency
+from utils.remesh import RemeshStep, pixel_footprint, vertex_edge_length
 import sys
 from scene import Scene, TriangleModel
 from utils.general_utils import safe_state
@@ -125,6 +126,10 @@ def training(
         raise ValueError("--voronoi_handles needs --mesh_path and --no_mesh_densify, and replaces --large_steps")
     if opt.freeze_mesh and (opt.voronoi_handles or opt.large_steps or opt.mesh_refine or opt.normal_only_motion):
         raise ValueError("--freeze_mesh keeps the mesh geometry fixed: no --voronoi_handles, --large_steps, --mesh_refine or --normal_only_motion")
+    if opt.remesh and (triangles._anchor is None or not opt.no_mesh_densify or opt.mesh_refine or opt.voronoi_handles or opt.large_steps
+                       or opt.freeze_mesh or opt.normal_only_motion or opt.tex_res > 0):
+        raise ValueError("--remesh needs --mesh_path and --no_mesh_densify, and replaces --mesh_refine, --voronoi_handles, --large_steps, "
+                         "--freeze_mesh, --normal_only_motion (no --tex_res)")
     if opt.mesh_carve:
         if triangles._anchor is None or not opt.no_mesh_densify or opt.mesh_floor_from_start or opt.carve_until >= opt.final_opacity_iter:
             raise ValueError("--mesh_carve needs --mesh_path and --no_mesh_densify, replaces --mesh_floor_from_start, and needs --carve_until < --final_opacity_iter")
@@ -245,6 +250,21 @@ def training(
         return 2 ** max(0, levels - int((it - opt.mv_from) // step))
 
     topology = None # edge connectivity, rebuilt after every prune/densify step
+
+    def mesh_faces_local():
+        # mesh faces in mesh_vertex_index() numbering (the mesh vertices come first after every remeshing pass)
+        idx = mesh_vertex_index()
+        local = torch.full((triangles.vertices.shape[0],), -1, dtype=torch.long, device="cuda")
+        local[idx] = torch.arange(idx.numel(), device="cuda")
+        return local[triangles._triangle_indices[triangles.triangle_is_mesh()].long()], idx
+
+    remesh_step, remesh_idx = None, None
+    if opt.remesh:
+        Fl, remesh_idx = mesh_faces_local()
+        remesh_step = RemeshStep(vertex_edge_length(triangles.vertices.detach()[remesh_idx], Fl))
+        print("Remeshing: target {} init edges at {}, halving every {} until {} (floor {} px), every {} its, max {} faces; step {} edges/it".format(
+            opt.remesh_start_len, opt.remesh_from, opt.remesh_halve_every, opt.remesh_until, opt.remesh_px,
+            opt.remesh_interval, opt.remesh_max_faces, opt.remesh_lr))
 
     for iteration in range(first_iter, opt.iterations + 1):
 
@@ -453,6 +473,21 @@ def training(
 
                     triangles._prune_vertices(vertex_mask)
 
+                if (opt.remesh and opt.remesh_from <= iteration <= opt.remesh_until
+                        and (iteration - opt.remesh_from) % opt.remesh_interval == 0):
+                    idx = mesh_vertex_index()
+                    Vm = triangles.vertices.detach()[idx]
+                    sched = opt.remesh_start_len * triangles.init_edge * 0.5 ** ((iteration - opt.remesh_from) // opt.remesh_halve_every)
+                    floor = opt.remesh_px * pixel_footprint(Vm, scene.getTrainCameras())
+                    target = torch.where(torch.isfinite(floor), torch.clamp(floor, min=sched), torch.full_like(floor, sched))
+                    stats = triangles.remesh_mesh(target, opt.remesh_max_faces, opt.remesh_relax)
+                    Fl, remesh_idx = mesh_faces_local()
+                    h = vertex_edge_length(triangles.vertices.detach()[remesh_idx], Fl)
+                    remesh_step = RemeshStep(h)
+                    print("[ITER {}] remesh: target {:.3f} init edges (floor median {:.3f}), split {}, collapsed {}, flipped {} -> {} mesh vertices, {} mesh faces, mean edge {:.3f} init edges".format(
+                        iteration, sched / triangles.init_edge, (target.median() / triangles.init_edge).item(), stats["split"], stats["collapsed"],
+                        stats["flipped"], stats["mesh_vertices"], stats["mesh_faces"], (h[h > 0].mean() / triangles.init_edge).item()))
+
                 if opt.mesh_carve and opt.carve_from <= iteration <= opt.carve_until:
                     carved = triangles.carve_mesh(opt.carve_threshold, opt.carve_min_views)
                     print("[ITER {}] carving: {} mesh faces deleted (opacity < {}, seen in >= {} views), {} mesh faces left".format(
@@ -559,6 +594,11 @@ def training(
                     if vor_idx.numel() != vor.num_vertices or (iteration % 500 == 0):
                         vor_idx = mesh_vertex_index()  # free-group pruning renumbers vertices
                     vor.step(triangles.vertices, vertex_lr * opt.vor_lr_mult, vor_idx)
+                if remesh_step is not None:
+                    if remesh_idx.numel() != remesh_step.num_vertices or (iteration % 500 == 0):
+                        remesh_idx = mesh_vertex_index()  # free-group pruning renumbers vertices
+                    vertex_lr = next(g["lr"] for g in triangles.optimizer.param_groups if g["name"] == "vertices")
+                    remesh_step.step(triangles.vertices, opt.remesh_lr * vertex_lr / opt.lr_triangles_points_init, remesh_idx)
                 if opt.freeze_mesh and triangles.vertices.grad is not None:
                     if triangles._vertex_is_mesh is None:
                         triangles.vertices.grad.zero_()

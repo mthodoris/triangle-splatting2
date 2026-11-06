@@ -202,6 +202,16 @@ class OptimizationParams(ParamGroup):
         self.carve_threshold = 0.5 # face opacity (lowest of its three vertex opacities, as the rasterizer uses) below which a face is deleted
         self.carve_min_views = 3 # only faces drawn in at least this many training views (since the start) can be deleted
         self.carve_init_opacity = 0.9
+        self.remesh = False # continuous remeshing of the mesh group (utils/remesh.py): split/collapse/flip/relax towards a target edge length every --remesh_interval its; mesh vertices move with an Adam step measured in local edge lengths
+        self.remesh_from = 1000
+        self.remesh_until = 20000
+        self.remesh_interval = 500
+        self.remesh_start_len = 1.0 # target edge length at --remesh_from, in init edges
+        self.remesh_halve_every = 3000 # the target halves every this many iterations (coarse to fine) ...
+        self.remesh_px = 4.0 # ... but never below this many image pixels in the training view where the vertex looks largest
+        self.remesh_max_faces = 1500000 # no more splits once the mesh has this many faces
+        self.remesh_relax = 0.5 # tangential smoothing per pass (fraction of the way to the neighbours' centroid)
+        self.remesh_lr = 0.003 # mesh vertex step per iteration, in local edge lengths (Adam-normalized); decays like the vertex lr schedule
 
         self.sigma_start = 0
 
