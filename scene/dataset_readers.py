@@ -91,7 +91,9 @@ def resize_to_multiple(tensor, multiple=28):
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     # Model to extract normal map
-    model = torch.hub.load('yvanyin/metric3d', 'metric3d_vit_large', pretrain=True)
+    # [physproxy] explicit ref + skip_validation: use the local hub cache without asking GitHub for the
+    # default branch (a GitHub 504 aborted training on 2026-11-10); downloads normally if not cached.
+    model = torch.hub.load('yvanyin/metric3d:main', 'metric3d_vit_large', pretrain=True, skip_validation=True)
     model.eval().cuda()
 
     cam_infos = []
