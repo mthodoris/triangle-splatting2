@@ -42,10 +42,10 @@ def _load_points(model_path):
 
 
 class ProxyTrainer:
-    def __init__(self, args, scene, triangles, model_path):
+    def __init__(self, args, scene, triangles, model_path, out_dir=None):
         assert args.proxy_coupling == "one_way", "two_way coupling is Phase 4b"
         self.args = args
-        self.out = os.path.join(model_path, "proxy")
+        self.out = out_dir or os.path.join(model_path, "proxy")
         os.makedirs(self.out, exist_ok=True)
         cams = scene.getTrainCameras()
         pts = _load_points(model_path)
@@ -70,8 +70,9 @@ class ProxyTrainer:
             w_surf=args.proxy_w_surf, w_free=args.proxy_w_free, w_occ=args.proxy_w_occ, w_eik=args.proxy_w_eik,
             w_normal=args.proxy_w_normal, w_simple=args.proxy_w_simple, simple_mode=args.proxy_simple_mode,
             margin=args.proxy_margin, thickness=args.proxy_thickness, delta=args.proxy_delta,
-            n_surf=args.proxy_n_surf, n_rays=args.proxy_n_rays, n_per_ray=args.proxy_n_per_ray)
-        self.log = JsonLogger(model_path, config=dict(vars(args)))
+            n_surf=args.proxy_n_surf, n_rays=args.proxy_n_rays, n_per_ray=args.proxy_n_per_ray,
+            free_band_frac=getattr(args, "proxy_free_band_frac", 0.0), free_band=getattr(args, "proxy_free_band", 0.3))
+        self.log = JsonLogger(model_path if out_dir is None else out_dir, config=dict(vars(args)))
         self.log.log(0, "setup", box_lo=lo, box_hi=hi, frame=frame, ground_z_local=ground,
                      grid_shapes=self.sdf.grid_shapes, n_params=self.sdf.num_params(),
                      voxel=self.sdf.voxel_size, loss_config=self.cfg.as_dict())

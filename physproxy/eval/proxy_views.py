@@ -61,58 +61,66 @@ def main():
     PV = torch.tensor(np.asarray(m.vertices), dtype=torch.float32, device="cuda")
     PF = torch.tensor(np.asarray(m.faces), dtype=torch.int64, device="cuda")
 
-    from PIL import Image
     with torch.no_grad():
         tri = TriangleModel(dataset.sh_degree)
         scene = Scene(dataset, tri, None, None, load_iteration=args.iteration, shuffle=False)
         tri.scaling = args.scale
         cams = scene.getTestCameras() if args.split == "test" else scene.getTrainCameras()
-        idx = args.views if args.views else list(range(len(cams)))
-        V, F = tri.get_vertices, tri.get_triangle_indices
-        tot = {"agree": 0, "blocks": 0, "see_through": 0, "n": 0}
-        per_view = []
-        for k, vi in enumerate(idx):
-            view = cams[vi]
-            pkg = render(view, tri, pipe, torch.zeros(3, device="cuda"))
-            ex = exact_depth(view, V, F, pkg["rend_ids"], pixel_alpha(pkg))
-            z, valid = ex["depth"], ex["valid"]
-            H, W = z.shape
-            pl = ex["points_world"] @ frame.T
-            in_box = valid & ((pl >= lo) & (pl <= hi)).all(-1)
-            zp, fp = p3d_zbuffer(view, PV, PF, H, W)
-            hit = fp >= 0
-            rel = (zp - z) / z.clamp_min(1e-6)
-            agree = in_box & hit & (rel.abs() <= args.tol)
-            blocks = in_box & hit & (rel < -args.tol)
-            see = in_box & ~(agree | blocks)
-            n = int(in_box.sum())
-            r = {"view": view.image_name, "in_box_frac": n / (H * W),
-                 "agree": int(agree.sum()) / max(n, 1), "blocks": int(blocks.sum()) / max(n, 1),
-                 "see_through": int(see.sum()) / max(n, 1)}
-            per_view.append(r)
-            for key, msk in [("agree", agree), ("blocks", blocks), ("see_through", see)]:
-                tot[key] += int(msk.sum())
-            tot["n"] += n
-            if k < args.save_images:
-                st = args.scale
-                rgb = (pkg["render"].clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                zr = (z * valid)[::st, ::st].cpu().numpy()
-                zpp = (zp * hit)[::st, ::st].cpu().numpy()
-                lo_d, hi_d = np.percentile(zr[zr > 0], [2, 98])
-                cls = np.zeros((H, W, 3), np.uint8)
-                cls[agree.cpu().numpy()] = (40, 170, 60)
-                cls[blocks.cpu().numpy()] = (220, 50, 40)
-                cls[see.cpu().numpy()] = (50, 90, 230)
-                cls[(~in_box).cpu().numpy()] = (60, 60, 60)
-                row = np.concatenate([rgb, colorize(zr, lo_d, hi_d), colorize(zpp, lo_d, hi_d), cls[::st, ::st]], axis=1)
-                Image.fromarray(row).save(os.path.join(out_dir, f"{view.image_name}.png"))
-        summary = {"proxy_mesh": args.proxy_mesh, "tol": args.tol, "views": len(idx),
-                   "in_box_pixels": tot["n"],
-                   "agree": tot["agree"] / max(tot["n"], 1), "blocks": tot["blocks"] / max(tot["n"], 1),
-                   "see_through": tot["see_through"] / max(tot["n"], 1), "per_view": per_view}
+        summary = compare_views(cams, tri, pipe, PV, PF, frame, lo, hi, tol=args.tol, out_dir=out_dir,
+                                save_images=args.save_images, views=args.views)
+        summary["proxy_mesh"] = args.proxy_mesh
         with open(os.path.join(out_dir, "summary.json"), "w") as fh:
             json.dump(summary, fh, indent=1)
         print(json.dumps({k: v for k, v in summary.items() if k != "per_view"}, indent=1))
+
+
+@torch.no_grad()
+def compare_views(cams, tri, pipe, PV, PF, frame, lo, hi, tol=0.02, out_dir=None, save_images=0, views=None):
+    """Classify in-box pixels of each view as agree / blocks / see_through (see module doc).
+    Renders at tri.scaling. Returns the summary dict."""
+    from PIL import Image
+    idx = views if views else list(range(len(cams)))
+    V, F = tri.get_vertices, tri.get_triangle_indices
+    tot = {"agree": 0, "blocks": 0, "see_through": 0, "n": 0}
+    per_view = []
+    for k, vi in enumerate(idx):
+        view = cams[vi]
+        pkg = render(view, tri, pipe, torch.zeros(3, device="cuda"))
+        ex = exact_depth(view, V, F, pkg["rend_ids"], pixel_alpha(pkg))
+        z, valid = ex["depth"], ex["valid"]
+        H, W = z.shape
+        pl = ex["points_world"] @ frame.T
+        in_box = valid & ((pl >= lo) & (pl <= hi)).all(-1)
+        zp, fp = p3d_zbuffer(view, PV, PF, H, W)
+        hit = fp >= 0
+        rel = (zp - z) / z.clamp_min(1e-6)
+        agree = in_box & hit & (rel.abs() <= tol)
+        blocks = in_box & hit & (rel < -tol)
+        see = in_box & ~(agree | blocks)
+        n = int(in_box.sum())
+        per_view.append({"view": view.image_name, "in_box_frac": n / (H * W),
+                         "agree": int(agree.sum()) / max(n, 1), "blocks": int(blocks.sum()) / max(n, 1),
+                         "see_through": int(see.sum()) / max(n, 1)})
+        for key, msk in [("agree", agree), ("blocks", blocks), ("see_through", see)]:
+            tot[key] += int(msk.sum())
+        tot["n"] += n
+        if out_dir is not None and k < save_images:
+            os.makedirs(out_dir, exist_ok=True)
+            st = tri.scaling
+            rgb = (pkg["render"].clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            zr = (z * valid)[::st, ::st].cpu().numpy()
+            zpp = (zp * hit)[::st, ::st].cpu().numpy()
+            lo_d, hi_d = np.percentile(zr[zr > 0], [2, 98])
+            cls = np.zeros((H, W, 3), np.uint8)
+            cls[agree.cpu().numpy()] = (40, 170, 60)
+            cls[blocks.cpu().numpy()] = (220, 50, 40)
+            cls[see.cpu().numpy()] = (50, 90, 230)
+            cls[(~in_box).cpu().numpy()] = (60, 60, 60)
+            row = np.concatenate([rgb, colorize(zr, lo_d, hi_d), colorize(zpp, lo_d, hi_d), cls[::st, ::st]], axis=1)
+            Image.fromarray(row).save(os.path.join(out_dir, f"{view.image_name}.png"))
+    return {"tol": tol, "views": len(idx), "in_box_pixels": tot["n"],
+            "agree": tot["agree"] / max(tot["n"], 1), "blocks": tot["blocks"] / max(tot["n"], 1),
+            "see_through": tot["see_through"] / max(tot["n"], 1), "per_view": per_view}
 
 
 if __name__ == "__main__":

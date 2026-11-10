@@ -184,6 +184,21 @@ def test_weights_switch_terms_off():
     assert set(terms) == {"L_surf", "L_eik", "L_simple"}
 
 
+def test_free_band_samples_lie_in_the_band():
+    view, verts, faces, dep = _wall_scene()
+    sdf = SDFField(torch.tensor([-2.0, -1.5, 0.5]), torch.tensor([2.0, 1.5, 4.5]), init="plane").to(DEV)
+    cfg = L.ProxyLossConfig(w_occ=0, w_eik=0, w_normal=0, w_surf=0, n_rays=500, n_per_ray=8,
+                            free_band_frac=1.0, free_band=0.3, margin=0.05)
+    x = L.build_samples(cfg, sdf, verts, faces, view, dep)["free"]
+    # Wall at z = 3, so the true distance before the wall along each ray is (3 - z) * |d| / d_z = (3 - z) * |d|.
+    dist = (3.0 - x[:, 2]) * (x / x[:, 2:3]).norm(dim=-1)
+    assert dist.min() >= 0.05 - 1e-4 and dist.max() <= 0.3 + 1e-4
+    cfg.free_band_frac = 0.5
+    x = L.build_samples(cfg, sdf, verts, faces, view, dep)["free"]
+    dist = (3.0 - x[:, 2]) * (x / x[:, 2:3]).norm(dim=-1)
+    assert 0.4 < (dist <= 0.3).float().mean() < 0.65
+
+
 def test_no_triangle_in_box_is_handled():
     sdf = SDFField(torch.tensor([-1.0, -1.0, -1.0]), torch.tensor([1.0, 1.0, 1.0]), init="sphere").to(DEV)
     v = torch.tensor([[5.0, 5, 5], [6, 5, 5], [5, 6, 5]], device=DEV)          # far outside the box

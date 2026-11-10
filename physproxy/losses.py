@@ -82,10 +82,11 @@ def rays_from_depth(view, depth_out, n_rays):
 def ray_points(o, d, D, mode, n_per_ray, margin, thickness=None, near=0.0, stratified=True):
     """Points along rays (s = view z-depth). mode "free": s in (near, D - margin/|d|);
     "occ": s in (D + margin/|d|, D + thickness/|d|). Rays whose interval is empty are dropped.
+    `near` may be a per-ray tensor (used for the free-space band).
     Returns [M,3]."""
     dn = d.norm(dim=-1)
     if mode == "free":
-        lo = torch.full_like(D, float(near))
+        lo = near if torch.is_tensor(near) else torch.full_like(D, float(near))
         hi = D - margin / dn
     elif mode == "occ":
         assert thickness is not None and thickness > margin
@@ -166,6 +167,8 @@ class ProxyLossConfig:
     n_surf: int = 32768
     n_rays: int = 4096
     n_per_ray: int = 16
+    free_band_frac: float = 0.0      # share of free samples in a band just before the surface
+    free_band: float = 0.3           # band width along the ray, scene units: s in (D - band/|d|, D - margin/|d|)
     n_eik_uniform: int = 8192
     n_eik_near: int = 8192
     eik_sigma: float = 0.05          # near-surface jitter, scene units
@@ -195,7 +198,16 @@ def build_samples(cfg, sdf, vertices, faces, view=None, depth_out=None, face_mas
     if view is not None and depth_out is not None and (cfg.w_free > 0 or cfg.w_occ > 0):
         o, d, D = rays_from_depth(view, depth_out, cfg.n_rays)
         if cfg.w_free > 0:
-            x = ray_points(o, d, D, "free", cfg.n_per_ray, cfg.margin, near=cfg.near)
+            nb = int(round(cfg.n_per_ray * cfg.free_band_frac))
+            parts = []
+            if cfg.n_per_ray - nb > 0:
+                parts.append(ray_points(o, d, D, "free", cfg.n_per_ray - nb, cfg.margin, near=cfg.near))
+            if nb > 0:
+                # Carving near silhouettes: most free-space samples along a whole ray are far
+                # from any surface and already satisfied; the band puts them where bloat sits.
+                band_lo = torch.clamp(D - cfg.free_band / d.norm(dim=-1), min=cfg.near)
+                parts.append(ray_points(o, d, D, "free", nb, cfg.margin, near=band_lo))
+            x = torch.cat(parts)
             s["free"] = x[sdf.inside_aabb(x)]
         if cfg.w_occ > 0:
             x = ray_points(o, d, D, "occ", max(2, cfg.n_per_ray // 4), cfg.margin, cfg.thickness)

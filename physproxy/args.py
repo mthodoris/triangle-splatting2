@@ -33,6 +33,8 @@ class ProxyParams(ParamGroup):
         self.proxy_n_surf = 32768
         self.proxy_n_rays = 4096
         self.proxy_n_per_ray = 16
+        self.proxy_free_band_frac = 0.0    # share of free-space samples in a band just before the surface
+        self.proxy_free_band = 0.3         # that band's width along the ray, scene units
         # Logging / export
         self.proxy_log_every = 100
         self.proxy_mesh_every = 0          # export the zero level set every N its (0 = only at the end)
