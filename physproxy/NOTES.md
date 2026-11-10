@@ -218,3 +218,23 @@ Findings:
 - **A stronger free-space weight removes it but punches holes:** w_free 4 gives 3.3 % bloat but 1.9 % see-through, visible as speckle holes in the thin table top. That is worse for a collider (things fall through). A stronger surface term (w_surf 3) does not prevent the holes.
 - **Chosen (O, now the defaults in `physproxy/args.py`):** grid base 32, thickness 0.03, margin 0.02, w_free 2, 16384 rays × 8 samples with 50 % in the band, MC resolution 384. **94.1 % agree / 5.3 % blocks / 0.59 % see-through**, vs 83.9 / 14.1 / 2.06 for the 4a settings. render→proxy p90 0.019. The meshes are larger (2.7M faces at MC 384); Phase 5 decimates.
 - Bloat measurement: `compare_views` now also reports the gap distribution on bloat pixels (`blocks_gap_p50/p90/p99`, `blocks_frac_gap_over_t`).
+
+## Phase 4b result (2026-11-10): two-way coupling
+
+Two full garden runs (30k plus 3k SDF-only steps, about 45 min each on the RTX 3060). Both use the post-sweep defaults and turn the proxy on at 20k. R0 is one-way. R1 adds two-way coupling from 23k: `--proxy_pull_w 5e-5 --proxy_prune_floaters`.
+
+| | R0 one-way | R1 two-way |
+|---|---|---|
+| Test PSNR / SSIM / LPIPS | 25.37 / 0.800 / 0.192 | 25.31 / 0.801 / 0.191 |
+| See-vs-hit agree / blocks / see-through | 94.7 / 3.8 / 1.5 % | 94.7 / 3.5 / 1.8 % |
+| render→proxy \|f\| p50 / p90 | 0.0044 / 0.016 | 0.0046 / 0.017 |
+| Proxy faces / components / largest-comp. area | 2.76M / 2,322 / 97.6 % | 2.68M / 2,812 / 96.0 % |
+| Render triangles / components | 399,514 / 251,884 | 398,615 / 252,426 |
+
+Findings:
+- **Two-way coupling at these settings is a no-op.** Rendering stays within the 0.2 dB budget (−0.05 dB), but none of the geometry metrics improve.
+- **The pull is too weak to move vertices.** λ 5e-5 was chosen to match the median photometric gradient. Vertex |f| stays at p50 0.0065 / p90 0.02 while it acts, and render→proxy is unchanged, because 99% of vertices were already within 0.04.
+- **Pruning removed few triangles and did not clean the proxy.** It ran 14 times and removed 6,243 triangles, 1.6% of the mesh. Every candidate came from the small-proxy-component criterion; the |f| > τ criterion never fired. Only 0.2% fewer render triangles remain, so upstream densification and pruning absorb the change. The proxy then has more small components (2,812 vs 2,322), not fewer: removing triangles leaves small, unsupported pieces that the SDF still closes into blobs.
+- Without decimation, the proxy is about 2.7M faces at MC 384. The 50k budget is a Phase 5 problem.
+
+Next options: a stronger pull (5e-4 to 5e-3, checking that PSNR holds), or skip two-way coupling for now. The floater problem is better handled on the proxy side in Phase 5 (component area threshold plus decimation), so the next step is Phase 5.
