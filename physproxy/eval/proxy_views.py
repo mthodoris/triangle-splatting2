@@ -31,7 +31,7 @@ from arguments import ModelParams, PipelineParams  # noqa: E402
 from scene import Scene  # noqa: E402
 from scene.triangle_model import TriangleModel  # noqa: E402
 from triangle_renderer import render  # noqa: E402
-from physproxy.depth import exact_depth, pixel_alpha  # noqa: E402
+from physproxy.depth import exact_depth, pixel_alpha, view_rays  # noqa: E402
 from physproxy.eval.zbuffer import p3d_zbuffer  # noqa: E402
 from physproxy.eval.check_depth import colorize  # noqa: E402
 
@@ -83,6 +83,7 @@ def compare_views(cams, tri, pipe, PV, PF, frame, lo, hi, tol=0.02, out_dir=None
     V, F = tri.get_vertices, tri.get_triangle_indices
     tot = {"agree": 0, "blocks": 0, "see_through": 0, "n": 0}
     per_view = []
+    gaps = []   # distance along the ray (scene units) by which the proxy is in front, on "blocks" pixels
     for k, vi in enumerate(idx):
         view = cams[vi]
         pkg = render(view, tri, pipe, torch.zeros(3, device="cuda"))
@@ -98,6 +99,8 @@ def compare_views(cams, tri, pipe, PV, PF, frame, lo, hi, tol=0.02, out_dir=None
         blocks = in_box & hit & (rel < -tol)
         see = in_box & ~(agree | blocks)
         n = int(in_box.sum())
+        dn = view_rays(view, H, W, z.device).norm(dim=-1)
+        gaps.append(((z - zp) * dn)[blocks])
         per_view.append({"view": view.image_name, "in_box_frac": n / (H * W),
                          "agree": int(agree.sum()) / max(n, 1), "blocks": int(blocks.sum()) / max(n, 1),
                          "see_through": int(see.sum()) / max(n, 1)})
@@ -118,7 +121,14 @@ def compare_views(cams, tri, pipe, PV, PF, frame, lo, hi, tol=0.02, out_dir=None
             cls[(~in_box).cpu().numpy()] = (60, 60, 60)
             row = np.concatenate([rgb, colorize(zr, lo_d, hi_d), colorize(zpp, lo_d, hi_d), cls[::st, ::st]], axis=1)
             Image.fromarray(row).save(os.path.join(out_dir, f"{view.image_name}.png"))
-    return {"tol": tol, "views": len(idx), "in_box_pixels": tot["n"],
+    g = torch.cat(gaps) if gaps else torch.zeros(0, device="cuda")
+    gq = {}
+    if g.numel():
+        sub = g[torch.randperm(g.numel(), device=g.device)[:2_000_000]]
+        gq = {f"blocks_gap_p{q}": float(torch.quantile(sub, q / 100)) for q in (50, 90, 99)}
+        for t in (0.02, 0.05, 0.1, 0.2):
+            gq[f"blocks_frac_gap_over_{t}"] = float((g > t).float().mean()) * tot["blocks"] / max(tot["n"], 1)
+    return {**gq, "tol": tol, "views": len(idx), "in_box_pixels": tot["n"],
             "agree": tot["agree"] / max(tot["n"], 1), "blocks": tot["blocks"] / max(tot["n"], 1),
             "see_through": tot["see_through"] / max(tot["n"], 1), "per_view": per_view}
 

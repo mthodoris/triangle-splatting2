@@ -12,7 +12,7 @@ class ProxyParams(ParamGroup):
         # Field and box
         self.proxy_init = "plane_ground"   # plane_ground | plane_center | sphere | none
         self.proxy_ground_pct = 5.0        # ground height = this percentile of in-box SfM heights
-        self.proxy_base_res = 16
+        self.proxy_base_res = 32           # finest level 256 along the longest axis (garden voxel ~0.044)
         self.proxy_levels = 4
         self.proxy_feat = 4
         self.proxy_hidden = 64
@@ -21,22 +21,22 @@ class ProxyParams(ParamGroup):
         self.proxy_lr_mlp = 1e-3
         # Losses (see physproxy/losses.py); a weight of 0 switches a term off
         self.proxy_w_surf = 1.0
-        self.proxy_w_free = 1.0
+        self.proxy_w_free = 2.0
         self.proxy_w_occ = 0.5
         self.proxy_w_eik = 0.1
         self.proxy_w_normal = 0.05
         self.proxy_w_simple = 0.0
         self.proxy_simple_mode = "curvature"
-        self.proxy_margin = 0.05
-        self.proxy_thickness = 0.2
+        self.proxy_margin = 0.02
+        self.proxy_thickness = 0.03         # thin: 0.2 made legs / table top / flowers fat (bloat sweep 2026-11-10)
         self.proxy_delta = 0.02
         self.proxy_n_surf = 32768
-        self.proxy_n_rays = 4096
-        self.proxy_n_per_ray = 16
-        self.proxy_free_band_frac = 0.0    # share of free-space samples in a band just before the surface
+        self.proxy_n_rays = 16384
+        self.proxy_n_per_ray = 8
+        self.proxy_free_band_frac = 0.5    # share of free-space samples in a band just before the surface
         self.proxy_free_band = 0.3         # that band's width along the ray, scene units
         # Logging / export
         self.proxy_log_every = 100
         self.proxy_mesh_every = 0          # export the zero level set every N its (0 = only at the end)
-        self.proxy_mesh_res = 256          # marching-cubes cells along the longest box axis
+        self.proxy_mesh_res = 384          # marching-cubes cells along the longest box axis
         super().__init__(parser, "Collision proxy (physproxy)")

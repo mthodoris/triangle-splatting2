@@ -186,3 +186,35 @@ So the field converges within about 2.5k steps. 99.95 % of the render surface in
 - Almost all the "blocks" error (the proxy in front of the visible surface) is **thin structures made fat**: table legs become thick blobs, the table top is a slab thicker than the real top (red rim under it), the dried flowers on the vase are one blob, and bush edges bulge. Causes: voxel 0.09 and `thickness` 0.2 (L_occ forces 0.2 of inside behind every surface, which is thicker than a leg or the table top), plus free-space samples spread along the whole ray, so few of them carve near the silhouettes.
 - See-through is rare (0.9 %): the proxy almost never lets a ray pass through something visible.
 - This must be fixed before two-way coupling, since 4b would pull triangles towards a bloated proxy. Candidate levers: finer grid (base 32 → voxel 0.044), thinner `thickness` (0.05–0.1) and smaller `margin`, and free-space samples concentrated in a band before the surface.
+
+## Bloat fix (2026-11-10): proxy-settings sweep on the frozen 4a model
+
+`physproxy/fit_proxy.py` fits only the SDF (3000 steps, one random training view per step, render scale 4) on the trained `p4a_oneway` triangles and scores it on the 24 test views (`compare_views`, depth tolerance 2 %). The in-training 4a proxy scored 81.8 / 17.3 / 0.9; the refit with the same settings (A) gives 83.9 / 14.1 / 2.1, so refits are a fair stand-in. Results also go to `output/physproxy/p4a_oneway/proxy_fits/summary.jsonl`.
+
+| Fit | Settings | Agree | Blocks (proxy in front) | See-through | render→proxy p90 | Faces (MC) | Components |
+|---|---|---|---|---|---|---|---|
+| A_default | 4a defaults: grid 16, thickness 0.2, margin 0.05, w_free 1, 4096 rays × 16 | 83.9 % | 14.1 % | 2.06 % | 0.0264 | 952,996 | 446 |
+| B_t01_m003 | A + thickness 0.1, margin 0.03 | 88.8 % | 10.2 % | 1.03 % | 0.0271 | 971,648 | 398 |
+| G_res32 | A + grid 32 | 80.9 % | 18.4 % | 0.67 % | 0.0220 | 2,574,152 | 1455 |
+| C_t01_m003_res32 | B + grid 32 | 87.3 % | 12.4 % | 0.30 % | 0.0223 | 2,688,768 | 1166 |
+| D_C_band05 | C + 50 % free samples in a 0.3 band before the surface | 90.6 % | 8.9 % | 0.49 % | 0.0227 | 2,583,780 | 1271 |
+| E_D_t005 | D + thickness 0.05 | 91.9 % | 7.7 % | 0.36 % | 0.0211 | 2,716,068 | 966 |
+| F_D_wocc02 | D + w_occ 0.2 | 92.0 % | 5.8 % | 2.22 % | 0.0170 | 2,649,112 | 1592 |
+| H_res16_t005_band05 | E with grid 16 | 90.9 % | 8.2 % | 0.92 % | 0.0273 | 977,972 | 480 |
+| I_E_6k | E, 6000 steps | 91.9 % | 7.8 % | 0.28 % | 0.0209 | 2,768,320 | 1053 |
+| J_E_band075_w02 | E + band 75 %, width 0.2 | 91.7 % | 7.8 % | 0.53 % | 0.0210 | 2,690,808 | 1069 |
+| K_E_t003 | E + thickness 0.03, margin 0.02 | 92.5 % | 7.1 % | 0.35 % | 0.0203 | 2,770,088 | 1042 |
+| L_K_wfree4 | K + w_free 4 | 94.8 % | 3.3 % | 1.91 % | 0.0179 | 2,600,208 | 1711 |
+| M_K_rays16k | K + 16384 rays × 8 | 92.7 % | 6.9 % | 0.38 % | 0.0199 | 2,772,980 | 1056 |
+| N_K_wfree4_rays16k | K + w_free 4 + 16384 rays × 8 | 95.0 % | 3.8 % | 1.20 % | 0.0185 | 2,627,236 | 1652 |
+| O_wfree2_rays16k | **K + w_free 2 + 16384 rays × 8 (new defaults)** | 94.1 % | 5.3 % | 0.59 % | 0.0193 | 2,713,532 | 1199 |
+| P_wfree4_wsurf3_rays16k | N + w_surf 3 | 94.5 % | 3.7 % | 1.78 % | 0.0104 | 2,843,312 | 1704 |
+
+Findings:
+- **Inside-band thickness is the main bloat lever** (0.2 → 0.1 → 0.05 → 0.03: 14.1 → 10.2 → 7.7 → 7.1 % with the other changes). L_occ forced 0.2 of inside behind every surface, thicker than a leg or the table top.
+- **The finer grid helps only once the band is thin**: grid 32 alone is worse (18.4 %, more floater components), and grid 32 with thickness 0.05 beats grid 16 (7.7 vs 8.2 % bloat, 0.36 vs 0.92 % holes). More steps (6k) change nothing, so the fits are not undertrained.
+- **Free-space band sampling** (half the free samples within 0.3 before the surface) helps: 12.4 → 8.9 %.
+- **The remaining bloat is not sub-voxel.** For K, the gap on bloat pixels is median 0.37, p90 2.7 units. It is solid proxy where the camera sees through to the background: mostly a rim under the table-top edge (the underside is barely seen from the training cameras, which mostly look down), plus bush fringes and leg drips.
+- **A stronger free-space weight removes it but punches holes:** w_free 4 gives 3.3 % bloat but 1.9 % see-through, visible as speckle holes in the thin table top. That is worse for a collider (things fall through). A stronger surface term (w_surf 3) does not prevent the holes.
+- **Chosen (O, now the defaults in `physproxy/args.py`):** grid base 32, thickness 0.03, margin 0.02, w_free 2, 16384 rays × 8 samples with 50 % in the band, MC resolution 384. **94.1 % agree / 5.3 % blocks / 0.59 % see-through**, vs 83.9 / 14.1 / 2.06 for the 4a settings. render→proxy p90 0.019. The meshes are larger (2.7M faces at MC 384); Phase 5 decimates.
+- Bloat measurement: `compare_views` now also reports the gap distribution on bloat pixels (`blocks_gap_p50/p90/p99`, `blocks_frac_gap_over_t`).
