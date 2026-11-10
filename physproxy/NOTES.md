@@ -125,3 +125,33 @@ Use the rasterizer's own output and do not add nvdiffrast or Open3D for training
 - `aabb_from_points(sfm, cam_centers)`: SfM points within 1.5× the max camera distance of the camera centroid, 2–98 % percentiles per axis, 5 % padding. On garden: [−4.87, 0.04, −3.26] … [5.70, 4.99, 6.09] (extent 10.6 × 4.9 × 9.4). With the default grid that is 9.6M parameters and a finest voxel of 0.083 / 0.039 / 0.074. One step (200k f + 50k FD gradients + backward) takes 31 ms and peaks at 0.69 GB on the 3060. With base 32 (finest 256): 76.7M parameters, 44 ms, 1.19 GB.
 - **Tilted up axis: resolved.** `physproxy/aabb.py` builds a gravity-aligned box: z = mean camera up (or the normal of the camera ring), x/y = principal axes of the scene in the ground plane, robust percentiles, top raised to the highest camera (`top_to_cameras`), since SfM pulls the upper percentile down and cut the vase top. `SDFField(frame=...)` takes the rotation (rows = local axes in world), and the box corners are in that frame. The prior, FD gradient and outputs stay in world units (a rotation preserves distances). With `isotropic=True` (default) the per-axis resolution follows the box extent, so voxels are about cubic. Garden: box 11.21 × 10.23 × 4.49 (local), covering 96.6 % of the SfM points within the radius and 100 % of the central table column. Grid (128, 117, 51) at the finest level, 3.5M parameters (vs 9.6M axis-aligned), voxel 0.088–0.090. Before the fix the axis-aligned box was 10.6 × 4.9 × 9.4 (y cut at camera height).
 - Tests (`physproxy/tests/test_sdf.py`, all pass): shapes and f == prior at init; FD ∇f vs the analytic sphere (error < 1e-3 for r > 0.25, error ∝ (h/r)²); FD vs autograd's first derivative on a rough random field (converges as h → 0: median relative error 0.46 at h=1e-2, 3e-4 at h=1e-4); FD eikonal loss gives finite gradients on all grids; fitting an off-centre sphere from a plane init (1500 Adam steps, 3.5 s) gives mean |f − f*| = 0.0022 over a 2-unit box, |f| = 0.0020 on the surface, mean ||∇f| − 1| = 0.035; the AABB helper drops a far background.
+
+## Phase 3 result (done, 2026-11-10)
+
+`physproxy/losses.py`. Every term has its own weight in `ProxyLossConfig`, and a weight of 0 skips both the term and its sampling. Distances are in scene units.
+
+| Term | Samples | Formula |
+|---|---|---|
+| `L_surf` | area-weighted barycentric points on render triangles that overlap the box (triangle bounds in the box frame vs the box) | mean \|f\| |
+| `L_free` | stratified points along rays to valid exact-depth pixels, s ∈ (near = 0.2, D − margin/\|d\|) | mean ReLU(δ − f) |
+| `L_occ` | s ∈ (D + margin/\|d\|, D + thickness/\|d\|) | mean ReLU(δ + f) |
+| `L_eik` | uniform in the oriented box + surface samples jittered by N(0, eik_sigma) | mean (\|∇f\| − 1)² |
+| `L_normal` | surface samples and their triangle normals | mean 1 − \|cos(n_tri, ∇f)\| (unsigned) |
+| `L_simple` | `curvature`: near-surface points, normal change over a random step; `area`: uniform box points | mean ‖n(x) − n(x+εu)‖², or mean e^{−\|f\|/β}/(2β) (= surface area / box volume) |
+
+- s is the view z-depth (ray = o + s·d, d = R_c2w (x/z, y/z, 1)), as in `depth.py`. Margins are true distances along the ray.
+- Defaults: margin 0.05, thickness 0.2, δ 0.02, weights surf 1 / free 1 / occ 0.5 / eik 0.1 / normal 0.05 / simple 0. **δ is kept small on purpose:** a free-space point is only guaranteed f > 0; it can sit next to another surface when the ray grazes it.
+- Surface sampling only uses triangles overlapping the box. Without that, 80 % of the area-weighted samples fell on big background triangles outside it (6.6k of 32k in the box, now 31.4k). Every sample set is clipped to the box, since outside it the grid is clamped.
+- Tests (`physproxy/tests/test_losses.py`, 11, all pass):
+  - Area-weighted sampling: 75 % ± 0.5 % on the 3×-area triangle, centroid recovered.
+  - Ray intervals respect margin and thickness along the ray.
+  - `L_surf` on an icosphere: < 1e-3, and 0.100 for a 0.1-too-small field.
+  - Exact `L_free` / `L_occ` on a ray toward a wall: 0 for the right wall; (3−m−2+δ)²/2/(3−m) for a too-near wall; δ+4−3.125 for a too-far one.
+  - `L_eik` = 0 / 1.000 for a unit / doubled sphere.
+  - `L_normal` = 0 for sphere normals (and flipped ones), 1 at 90°, 0.5 at 60°.
+  - Area density × volume = 4πr² and 4.0 for a plane, within 3 %.
+  - Curvature: 0 on a plane, > 4× larger on a sphere of a quarter the radius.
+  - No triangle in the box gives finite losses.
+  - **Integration:** an `SDFField` started as a plane at z = 1.5, trained 800 steps from one camera's exact depth of a wall at z = 3 with all five terms, ends with its zero crossing on the optical axis at z = 3.002.
+- Garden smoke test (baseline model, oriented box, plane init, default config, one view per step): 31.4k surface, 62k free and 12.8k occupied samples; 23 ms for samples + losses + backward; 2.0 GB peak including the TS+ model. Not trained yet; that is Phase 4.
+- For Phase 4: the plane init sits at the box centre (local z ≈ −1.1), while the ground is at local z ≈ −3. A better init is a plane at a low percentile of the SfM heights.

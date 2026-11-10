@@ -25,6 +25,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def fd_gradient(fn, x, h):
+    """Central finite-difference gradient of a scalar field fn: [M,3] -> [M], at x [..., 3]."""
+    shp = x.shape[:-1]
+    x = x.reshape(-1, 1, 3)
+    off = h * torch.cat([torch.eye(3, device=x.device), -torch.eye(3, device=x.device)], 0)  # [6,3]
+    f6 = fn((x + off[None]).reshape(-1, 3)).reshape(-1, 6)
+    return ((f6[:, :3] - f6[:, 3:]) / (2 * h)).reshape(*shp, 3)
+
+
 class SDFField(nn.Module):
     def __init__(self, aabb_min, aabb_max, frame=None, base_res=16, n_levels=4, growth=2.0, feat_dim=4,
                  hidden=64, n_hidden=2, init="sphere", init_radius=0.5, init_center=None,
@@ -135,15 +144,9 @@ class SDFField(nn.Module):
     def gradient(self, x, h=None, return_sdf=False):
         """Central-difference grad f, [..., 3]. One batched call of 6 offsets."""
         h = self.default_fd_step() if h is None else h
-        shp = x.shape[:-1]
-        x = x.reshape(-1, 1, 3)
-        off = h * torch.cat([torch.eye(3, device=x.device), -torch.eye(3, device=x.device)], 0)  # [6,3]
-        f6 = self.forward((x + off[None]).reshape(-1, 3)).reshape(-1, 6)
-        g = (f6[:, :3] - f6[:, 3:]) / (2 * h)
-        g = g.reshape(*shp, 3)
+        g = fd_gradient(self, x, h)
         if return_sdf:
-            # Mean of the 6 samples equals f(x) up to O(h^2) curvature; evaluate exactly instead.
-            return self.forward(x.reshape(*shp, 3)), g
+            return self.forward(x), g
         return g
 
     def num_params(self):
