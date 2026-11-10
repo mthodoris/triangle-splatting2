@@ -109,7 +109,7 @@ Use the rasterizer's own output and do not add nvdiffrast or Open3D for training
 ## Phase 1 result (done, 2026-11-10)
 
 - `physproxy/depth.py`: `exact_depth(view, vertices, faces, rend_ids, rend_alpha)` returns z-depth, validity, triangle id, barycentrics and world points per render pixel, differentiable w.r.t. the vertices. `render_exact_depth(view, triangles, render_pkg)` wraps a `render()` output.
-- Upstream hook: `render()` also returns `alpha_full` (`allmap[1:2]` at render resolution), marked `# [physproxy]`. It adds one dict key and changes nothing else, so the baseline is unaffected.
+- **No upstream file is modified** (user rule, 2026-11-10; an earlier `alpha_full` key in `render()` was reverted). Pixel validity comes from unmodified outputs: `physproxy.depth.pixel_alpha(pkg)` = `depth_full > 0` (the median depth and `rend_ids` are written in the same branch) and `rend_alpha ≥ 0.5` (repeated from image to render resolution).
 - Check (`physproxy/eval/check_depth.py`, baseline garden `images_8`, 4 test views, render scale 4 = 2592×1680; output in `output/physproxy/baseline_garden8/physproxy_depth_check/`):
   - valid pixels 99.97–99.999 %; every hit lies on its triangle (min barycentric ≥ 0).
   - Independent z-buffer (pytorch3d, perspective-correct, same mesh): where both pick the same triangle (73–74 % of pixels) the depth agrees to 6e-8 relative (max 2e-6). On the remaining pixels both hit the same surface through different triangles of the stacked layers (median 0.15 %, p90 0.6 % apart). TS+ sorts by centroid per tile, and 9 % of those pixels lie on triangles TS+ culls.
@@ -155,3 +155,34 @@ Use the rasterizer's own output and do not add nvdiffrast or Open3D for training
   - **Integration:** an `SDFField` started as a plane at z = 1.5, trained 800 steps from one camera's exact depth of a wall at z = 3 with all five terms, ends with its zero crossing on the optical axis at z = 3.002.
 - Garden smoke test (baseline model, oriented box, plane init, default config, one view per step): 31.4k surface, 62k free and 12.8k occupied samples; 23 ms for samples + losses + backward; 2.0 GB peak including the TS+ model. Not trained yet; that is Phase 4.
 - For Phase 4: the plane init sits at the box centre (local z ≈ −1.1), while the ground is at local z ≈ −3. A better init is a plane at a low percentile of the SfM heights.
+
+## Phase 4a result (done, 2026-11-10): one-way coupling
+
+**Integration without upstream edits.** `physproxy/train_proxy.py` takes the same arguments as `train.py` plus `--proxy*` (`physproxy/args.py`). It runs the unmodified `train.training()`, after replacing, inside its own process only:
+- `train.Scene` with a subclass that builds the `ProxyTrainer`,
+- `train.render` with a wrapper that snapshots, for training cameras only, the view, `rend_ids`, validity, and vertex/face references (pruning replaces these tensors, so the references stay consistent with the ids),
+- `optimizer.step` with a wrapper that first runs the SDF step on the last snapshot (under `enable_grad`, since upstream calls `step` inside `no_grad`).
+
+`finish()` runs after `training()` returns. Upstream does not call `step` on the last iteration, so the SDF skips that one step. `physproxy/compat.py` routes the Metric3D `torch.hub.load` to the local cache within physproxy processes, because a GitHub 504 had aborted startup.
+
+**Run:** `python physproxy/train_proxy.py -s .../garden -i images_8 -m output/physproxy/p4a_oneway --eval --proxy --proxy_start 20000 --proxy_mesh_every 2500 --proxy_extra_iters 3000`. Defaults: ground-plane init at local z = −3.20 (5th percentile of in-box SfM heights), grid 16→128 (finest 128×117×51, voxel ≈ 0.09), losses as in Phase 3. Took 36 min total on the 3060 (baseline 28). The SDF step costs 29 ms at render scale 1–2 and 48 ms at scale 4.
+
+**Rendering is unchanged** (expected with detached triangles): test 25.33 dB / SSIM 0.801 / LPIPS 0.192 (`render.py` + `metrics.py`) vs baseline 25.34 / 0.801 / 0.192.
+
+**Convergence** (JSON log, every 100 steps): L_surf 0.025 → 0.011 within 1k steps, then flat around 0.0095–0.011; L_free ≈ 3e-4 throughout; L_eik 0.092 → 0.057; L_normal 0.24 → 0.157, still slowly falling. Exported meshes (render→proxy p50/p90; proxy→render p50/p90, scene units):
+
+| it | proxy faces | components | watertight | render→proxy p50 / p90 | proxy→render p50 / p90 |
+|---|---|---|---|---|---|
+| 20000 (init plane) | 244k | — | yes | 0.089 / 1.39 | 0.050 / 0.139 |
+| 22500 | 966k | — | yes | 0.0069 / 0.027 | 0.036 / 0.122 |
+| 25000 | 997k | — | yes | 0.0063 / 0.025 | 0.036 / 0.123 |
+| 27500 | 998k | — | yes | 0.0067 / 0.027 | 0.037 / 0.128 |
+| 33000 (after 3k SDF-only) | 1.01M | 719 (largest 99.6 % of area) | yes, manifold, consistent winding | 0.0068 / 0.027 | 0.037 / 0.130 |
+
+So the field converges within about 2.5k steps. 99.95 % of the render surface in the box lies within one voxel of the zero level.
+
+**What you see vs what you hit** (`physproxy/eval/proxy_views.py`, 24 test views, 18.1M in-box pixels, tolerance 2 % of depth): **agree 81.8 %, blocks 17.3 %, see-through 0.9 %.** Pictures are in `output/physproxy/p4a_oneway/proxy/views_mesh_33000/`.
+- Ground, lawn, paving and the table top are right (green).
+- Almost all the "blocks" error (the proxy in front of the visible surface) is **thin structures made fat**: table legs become thick blobs, the table top is a slab thicker than the real top (red rim under it), the dried flowers on the vase are one blob, and bush edges bulge. Causes: voxel 0.09 and `thickness` 0.2 (L_occ forces 0.2 of inside behind every surface, which is thicker than a leg or the table top), plus free-space samples spread along the whole ray, so few of them carve near the silhouettes.
+- See-through is rare (0.9 %): the proxy almost never lets a ray pass through something visible.
+- This must be fixed before two-way coupling, since 4b would pull triangles towards a bloated proxy. Candidate levers: finer grid (base 32 → voxel 0.044), thinner `thickness` (0.05–0.1) and smaller `margin`, and free-space samples concentrated in a band before the surface.

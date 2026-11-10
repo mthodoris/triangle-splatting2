@@ -5,6 +5,7 @@ Rendering metrics are on the 24 test views (`--eval`, every 8th image) via `rend
 | Scene | Method | Commit | PSNR | SSIM | LPIPS | Triangles | Components | Largest comp. (area %) | Boundary edges | Non-manifold edges | Watertight | Hausdorff | Raycast agree |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | garden `images_8` | TS+ baseline, upstream defaults, 30k | `4f0af82` (main) | 25.34 | 0.801 | 0.192 | 396,680 | 250,382 | 0.05 % (20 faces) | 895,596 (85.9 %) | 0 | no | — | — |
+| garden `images_8` | 4a one-way SDF proxy (render mesh unchanged) | `0cfa3d7` | 25.33 | 0.801 | 0.192 | proxy (MC 256, not decimated): 1,008,520 | 719 | 99.6 % | 0 | 0 | **yes** | render→proxy p50 0.007 / p90 0.027 | see-what-you-hit: agree 81.8 %, blocks 17.3 %, see-through 0.9 % |
 
 ## Baseline "before" picture (garden `images_8`, 2026-11-10)
 
