@@ -155,7 +155,8 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
             'surf_depth': surf_depth,
             'surf_normal': surf_normal,
             "entropy": rendered_entropy,
-            "depth_full": allmap[5:6]
+            "depth_full": allmap[5:6],
+            "alpha_full": allmap[1:2],  # [physproxy] alpha at render resolution, pairs with rend_ids
     })
 
     return rets

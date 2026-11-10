@@ -89,7 +89,7 @@ Details that matter for the proxy:
 
 ## Logging
 
-**TensorBoard is not installed in the local `.venv`**, so `tb_writer` is `None` and nothing is logged except stdout. Also `--quiet` (`safe_state`) silences stdout entirely, including the PSNR prints, so leave it off, or evaluate afterwards with `render.py` + `metrics.py`. Before Phase 4, either install `tensorboard` (light) or also write a JSON log of the new terms.
+**TensorBoard is not installed in the local `.venv`**, so `tb_writer` is `None` and nothing is logged except stdout. Also `--quiet` (`safe_state`) silences stdout entirely, including the PSNR prints, so leave it off, or evaluate afterwards with `render.py` + `metrics.py`. Decision (2026-11-10): new terms are logged by `physproxy/log.py` (`JsonLogger`) to `<model_path>/physproxy_log.jsonl`, one JSON record per line, and read back with `read_log(path, tag)`. TensorBoard is not added.
 
 When present, TensorBoard `SummaryWriter(model_path)` is created in `prepare_output_and_logger` and passed as `tb_writer` to `training_report` (logs `train_loss_patches/*`, `iter_time`, test/train PSNR every 1000 its). New terms are logged with `tb_writer.add_scalar('physproxy/<name>', v, iteration)`. `cfg_args` (a dump of the argument namespace) is written to the output dir.
 
@@ -105,3 +105,15 @@ When present, TensorBoard `SummaryWriter(model_path)` is created in `prepare_out
 
 Use the rasterizer's own output and do not add nvdiffrast or Open3D for training-time depth:
 `rend_ids` (channel 6, full render resolution) gives the opaque triangle seen at each pixel. An exact per-pixel depth is then one ray/plane intersection per pixel in PyTorch (camera ray vs. the plane of that triangle), which costs O(pixels), needs no new dependency, and fixes the centroid-depth error. Pixels with alpha < 0.5 or an out-of-range id are invalid. Once the floor is at 0.9999 (from about 24k) the median triangle is the visible one. Open3D `RaycastingScene` stays an offline cross-check (Phase 6 needs it anyway).
+
+## Phase 1 result (done, 2026-11-10)
+
+- `physproxy/depth.py`: `exact_depth(view, vertices, faces, rend_ids, rend_alpha)` returns z-depth, validity, triangle id, barycentrics and world points per render pixel, differentiable w.r.t. the vertices. `render_exact_depth(view, triangles, render_pkg)` wraps a `render()` output.
+- Upstream hook: `render()` also returns `alpha_full` (`allmap[1:2]` at render resolution), marked `# [physproxy]`. It adds one dict key and changes nothing else, so the baseline is unaffected.
+- Check (`physproxy/eval/check_depth.py`, baseline garden `images_8`, 4 test views, render scale 4 = 2592×1680; output in `output/physproxy/baseline_garden8/physproxy_depth_check/`):
+  - valid pixels 99.97–99.999 %; every hit lies on its triangle (min barycentric ≥ 0).
+  - Independent z-buffer (pytorch3d, perspective-correct, same mesh): where both pick the same triangle (73–74 % of pixels) the depth agrees to 6e-8 relative (max 2e-6). On the remaining pixels both hit the same surface through different triangles of the stacked layers (median 0.15 %, p90 0.6 % apart). TS+ sorts by centroid per tile, and 9 % of those pixels lie on triangles TS+ culls.
+  - Units and alignment vs COLMAP: at the keypoints of 4.7–5.9k SfM points per view, median |Δz|/z = 0.2–0.3 %, and 98–99 % are within 5 %. So the depth is in scene (COLMAP) units and in the right frame.
+  - Centroid depth (rasterizer) vs exact: mean 0.24–0.29 %, p99 0.7–0.8 % at the end of training, where the triangles are small. The error matters most early in training, when the triangles are large, and for gradients, since the centroid depth is constant over a triangle.
+  - The depth images (RGB | centroid | exact | difference) match the RGB visually.
+- Tests: `physproxy/tests/test_depth_and_log.py` (tilted plane with analytic depth, rotated camera vs a known point, world↔view round-trip, JSON logger).
