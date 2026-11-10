@@ -53,6 +53,16 @@ class SDFField(nn.Module):
         out_scale: scene units per MLP output unit (default: smallest half-extent / 4).
         """
         super().__init__()
+        # Everything needed to rebuild the field from a checkpoint (see from_checkpoint).
+        self.ctor_kwargs = dict(
+            aabb_min=torch.as_tensor(aabb_min, dtype=torch.float32).tolist(),
+            aabb_max=torch.as_tensor(aabb_max, dtype=torch.float32).tolist(),
+            frame=None if frame is None else torch.as_tensor(frame, dtype=torch.float32).tolist(),
+            base_res=base_res, n_levels=n_levels, growth=growth, feat_dim=feat_dim, hidden=hidden,
+            n_hidden=n_hidden, init=init, init_radius=init_radius,
+            init_center=None if init_center is None else torch.as_tensor(init_center, dtype=torch.float32).tolist(),
+            init_normal=None if init_normal is None else torch.as_tensor(init_normal, dtype=torch.float32).tolist(),
+            init_offset=init_offset, out_scale=out_scale, isotropic=isotropic)
         aabb_min = torch.as_tensor(aabb_min, dtype=torch.float32)
         aabb_max = torch.as_tensor(aabb_max, dtype=torch.float32)
         assert (aabb_max > aabb_min).all()
@@ -148,6 +158,23 @@ class SDFField(nn.Module):
         if return_sdf:
             return self.forward(x), g
         return g
+
+    @classmethod
+    def from_checkpoint(cls, path, device="cuda", **override):
+        """Rebuild from a physproxy sdf_<it>.pt. Checkpoints written before the
+        constructor arguments were stored need them via **override (e.g. init_offset)."""
+        ck = torch.load(path, map_location=device)
+        kw = dict(ck.get("ctor_kwargs") or {})
+        if not kw:
+            a, sd = ck["args"], ck["state_dict"]
+            kw = dict(aabb_min=sd["aabb_min"].cpu(), aabb_max=sd["aabb_max"].cpu(), frame=sd["frame"].cpu(),
+                      base_res=a["proxy_base_res"], n_levels=a["proxy_levels"], feat_dim=a["proxy_feat"],
+                      hidden=a["proxy_hidden"],
+                      init="plane" if a["proxy_init"].startswith("plane") else a["proxy_init"])
+        kw.update(override)
+        sdf = cls(**kw).to(device)
+        sdf.load_state_dict(ck["state_dict"])
+        return sdf.eval()
 
     def num_params(self):
         return sum(p.numel() for p in self.parameters())

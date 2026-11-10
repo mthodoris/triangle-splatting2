@@ -23,38 +23,15 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from physproxy.compat import use_cached_metric3d  # noqa: E402
+use_cached_metric3d()
 from arguments import ModelParams, PipelineParams  # noqa: E402
 from scene import Scene  # noqa: E402
 from scene.triangle_model import TriangleModel  # noqa: E402
 from scene.colmap_loader import read_extrinsics_binary, read_intrinsics_binary  # noqa: E402
 from triangle_renderer import render  # noqa: E402
-from physproxy.depth import exact_depth, world_to_view  # noqa: E402
-
-
-def p3d_zbuffer(view, vertices, faces, H, W, znear=0.2):
-    """Independent exact z-buffer with pytorch3d. Returns (zbuf [H,W], face_id [H,W])."""
-    from pytorch3d.renderer.mesh.rasterize_meshes import rasterize_meshes
-    from pytorch3d.structures import Meshes
-    import math
-    pv = world_to_view(view, vertices)
-    keep = (pv[faces.long()][..., 2] > znear).all(dim=1)
-    fid = torch.nonzero(keep, as_tuple=True)[0]
-    f = faces[fid].long()
-    tx, ty = math.tan(view.FoVx / 2), math.tan(view.FoVy / 2)
-    z = pv[:, 2].clamp_min(1e-6)
-    # pytorch3d NDC: +X left, +Y up, the shorter image side spans [-1, 1].
-    s_x = W / min(H, W)
-    s_y = H / min(H, W)
-    v_ndc = torch.stack([-(pv[:, 0] / z / tx) * s_x, -(pv[:, 1] / z / ty) * s_y, pv[:, 2]], dim=-1)
-    mesh = Meshes(verts=[v_ndc], faces=[f])
-    p2f, zbuf, _, _ = rasterize_meshes(mesh, image_size=(H, W), blur_radius=0.0, faces_per_pixel=1,
-                                       perspective_correct=True, bin_size=1 << max(6, math.ceil(math.log2(max(H, W) / 22))),
-                                       max_faces_per_bin=400000,
-                                       cull_backfaces=False)
-    p2f = p2f[0, ..., 0]
-    zb = zbuf[0, ..., 0]
-    face = torch.where(p2f >= 0, fid[p2f.clamp_min(0)], torch.full_like(p2f, -1))
-    return zb, face
+from physproxy.depth import exact_depth, pixel_alpha, world_to_view  # noqa: E402
+from physproxy.eval.zbuffer import p3d_zbuffer  # noqa: E402
 
 
 def colorize(d, lo, hi):
@@ -112,7 +89,7 @@ def main():
         for vi in args.views:
             view = cams[vi % len(cams)]
             pkg = render(view, tri, pipe, bg)
-            ex = exact_depth(view, V, F, pkg["rend_ids"], pkg["alpha_full"])
+            ex = exact_depth(view, V, F, pkg["rend_ids"], pixel_alpha(pkg))
             H, W = ex["depth"].shape
             valid = ex["valid"]
             z = ex["depth"]

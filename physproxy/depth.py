@@ -92,7 +92,26 @@ def exact_depth(view, vertices, faces, rend_ids, rend_alpha, alpha_min=0.5, eps=
     return {"depth": depth, "valid": valid, "tri_id": tri, "bary": bary, "points_world": pts_world}
 
 
+def pixel_alpha(render_pkg):
+    """Per-pixel validity weight at render resolution from an unmodified upstream
+    render() output (no upstream change needed).
+
+    rend_ids is only written where the rasterizer passed a triangle while
+    T > 0.5, and the same branch writes the median depth, which is > 0.2 there
+    (near cull), else 0. Combined with the accumulated alpha (returned at image
+    resolution, area-averaged), repeated to render resolution, valid pixels are
+    depth_full > 0 and alpha >= 0.5. Returns a float [1, Hr, Wr] (1 valid, 0 not)
+    to pass as `rend_alpha` to exact_depth.
+    """
+    depth_hr = render_pkg["depth_full"]
+    a = render_pkg["rend_alpha"]
+    s_h = depth_hr.shape[-2] // a.shape[-2]
+    s_w = depth_hr.shape[-1] // a.shape[-1]
+    a_hr = a.repeat_interleave(s_h, dim=-2).repeat_interleave(s_w, dim=-1)
+    return ((depth_hr > 0) & (a_hr >= 0.5)).float()
+
+
 def render_exact_depth(view, triangles, render_pkg):
-    """Convenience wrapper around a `triangle_renderer.render` output."""
+    """Convenience wrapper around an upstream `triangle_renderer.render` output."""
     return exact_depth(view, triangles.get_vertices, triangles.get_triangle_indices,
-                       render_pkg["rend_ids"], render_pkg["alpha_full"])
+                       render_pkg["rend_ids"], pixel_alpha(render_pkg))
