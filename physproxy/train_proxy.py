@@ -38,7 +38,8 @@ from physproxy.depth import pixel_alpha  # noqa: E402
 
 
 def install_hooks(proxy_args):
-    state = {"proxy": None, "scene": None, "last": None, "iteration": 0, "test_ids": set(), "train_ids": set()}
+    state = {"proxy": None, "scene": None, "last": None, "iteration": 0, "test_ids": set(), "train_ids": set(),
+             "support": None, "support_faces": None, "v_param": None}
     orig_render = upstream.render
     orig_scene = upstream.Scene
 
@@ -59,16 +60,41 @@ def install_hooks(proxy_args):
 
             def step(*sa, **skw):
                 state["iteration"] += 1
+                it = state["iteration"]
+                proxy = state["proxy"]
                 last = state["last"]
                 if last is not None:
-                    state["proxy"].step(state["iteration"], *last, pc)
+                    proxy.step(it, *last, pc)
                     state["last"] = None
+                if proxy.coupling_active(it):
+                    # (i) pull: only if upstream did not replace the vertex tensor this iteration
+                    # (pruning/densification), otherwise its gradients are gone anyway.
+                    if proxy_args.proxy_pull_w > 0 and pc.vertices is state["v_param"] and pc.vertices.grad is not None:
+                        proxy.pull(it, pc)
+                    # (ii) floater pruning, half-way between upstream's pruning iterations.
+                    every = proxy_args.proxy_prune_every
+                    if proxy_args.proxy_prune_floaters and it % every == every // 2:
+                        sup = state["support"] if state["support_faces"] is pc.get_triangle_indices else None
+                        proxy.prune_floaters(it, pc, sup)
                 return orig_step(*sa, **skw)
             opt.step = step
             opt._physproxy_wrapped = True
         if id(viewpoint_camera) in state["train_ids"]:
-            state["last"] = (viewpoint_camera, pkg["rend_ids"].detach(), pixel_alpha(pkg).detach(),
+            alpha = pixel_alpha(pkg).detach()
+            state["last"] = (viewpoint_camera, pkg["rend_ids"].detach(), alpha,
                              pc.get_vertices.detach(), pc.get_triangle_indices)
+            state["v_param"] = pc.vertices
+            # View support: in how many training renders each triangle is the visible one
+            # somewhere; reset whenever upstream replaces the face tensor.
+            Fc = pc.get_triangle_indices
+            if state["support_faces"] is not Fc:
+                state["support"] = torch.zeros(Fc.shape[0], device=Fc.device)
+                state["support_faces"] = Fc
+            with torch.no_grad():
+                ids = torch.round(pkg["rend_ids"].reshape(-1)).long()
+                ok = (alpha.reshape(-1) > 0) & (ids >= 0) & (ids < Fc.shape[0])
+                seen = torch.unique(ids[ok])
+                state["support"][seen] += 1
         return pkg
 
     upstream.Scene = ProxyScene

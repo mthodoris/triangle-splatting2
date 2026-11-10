@@ -43,7 +43,7 @@ def _load_points(model_path):
 
 class ProxyTrainer:
     def __init__(self, args, scene, triangles, model_path, out_dir=None):
-        assert args.proxy_coupling == "one_way", "two_way coupling is Phase 4b"
+        assert args.proxy_coupling in ("one_way", "two_way"), args.proxy_coupling
         self.args = args
         self.out = out_dir or os.path.join(model_path, "proxy")
         os.makedirs(self.out, exist_ok=True)
@@ -112,6 +112,77 @@ class ProxyTrainer:
             self._sdf_step(iteration, view, ids, alpha, V, Fc)
         if self.args.proxy_mesh_every > 0 and iteration % self.args.proxy_mesh_every == 0:
             self.export(iteration, triangles)
+
+    # ------------------------------------------------------------------ two-way coupling (4b)
+    def coupling_active(self, iteration):
+        return self.args.proxy_coupling == "two_way" and iteration >= self.args.proxy_couple_start
+
+    def pull(self, iteration, triangles):
+        """Add grad of proxy_pull_w * mean|f(v)| (SDF frozen) to the vertex gradients
+        accumulated by upstream's backward, just before its optimizer step."""
+        V = triangles.vertices
+        with torch.no_grad():
+            f0 = self.sdf(V)
+            sel = self.sdf.inside_aabb(V) & (f0.abs() < self.args.proxy_pull_tau)
+        n = int(sel.sum())
+        if n == 0:
+            return
+        self.sdf.requires_grad_(False)
+        try:
+            with torch.enable_grad():
+                loss = self.args.proxy_pull_w * self.sdf(V[sel]).abs().mean()
+                loss.backward()
+        finally:
+            self.sdf.requires_grad_(True)
+        if iteration % self.args.proxy_log_every == 0:
+            self.log.log(iteration, "pull", L_pull=loss / self.args.proxy_pull_w, n_pulled=n,
+                         f_abs_p50=f0[sel].abs().median(), f_abs_p90=torch.quantile(f0[sel].abs()[:1_000_000], 0.9))
+
+    @torch.no_grad()
+    def prune_floaters(self, iteration, triangles, support):
+        """Delete in-box triangles that (|f(centroid)| > tau OR lie on a proxy component with area <
+        comp_area) AND were the visible triangle in <= max_support training renders since the
+        last change of the face set. Uses upstream's own TriangleModel.prune_triangles."""
+        from pytorch3d.ops import knn_points
+        import scipy.sparse as sp
+        from scipy.sparse.csgraph import connected_components
+        a = self.args
+        V, Fc = triangles.get_vertices.detach(), triangles.get_triangle_indices
+        if support is None or support.shape[0] != Fc.shape[0]:
+            self.log.log(iteration, "prune_skipped", reason="support/face count mismatch")
+            return 0
+        c = V[Fc.long()].mean(1)
+        inb = self.sdf.inside_aabb(c)
+        f = torch.cat([self.sdf(x) for x in c.split(2 ** 18)])
+        far = inb & (f.abs() > a.proxy_prune_tau)
+        # Proxy components (marching cubes at a moderate resolution).
+        pv, pf = extract_mesh(self.sdf, res=a.proxy_prune_mesh_res)
+        small = torch.zeros_like(inb)
+        n_small_comp = 0
+        if pf.shape[0] > 0:
+            pfn = pf.cpu().numpy()
+            e = np.concatenate([pfn[:, [0, 1]], pfn[:, [1, 2]]])
+            A = sp.coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(pv.shape[0], pv.shape[0]))
+            ncomp, lab = connected_components(A, directed=False)
+            tri = pv[pf]
+            area = 0.5 * torch.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=-1).norm(dim=-1)
+            lab_t = torch.as_tensor(lab, device=pv.device)
+            carea = torch.zeros(ncomp, device=pv.device).index_add_(0, lab_t[pf[:, 0]], area)
+            n_small_comp = int((carea < a.proxy_prune_comp_area).sum())
+            idx = inb.nonzero(as_tuple=True)[0]
+            d = knn_points(c[idx][None], pv[None].float(), K=1)
+            nn_v = d.idx[0, :, 0]
+            near = d.dists[0, :, 0].sqrt() < 2 * float(self.sdf.voxel_size.max())
+            small[idx] = near & (carea[lab_t[nn_v]] < a.proxy_prune_comp_area)
+        low = support <= a.proxy_prune_max_support
+        cand = (far | small) & low
+        n = int(cand.sum())
+        self.log.log(iteration, "prune", n_pruned=n, n_far=int(far.sum()), n_small=int(small.sum()),
+                     n_far_low=int((far & low).sum()), n_small_low=int((small & low).sum()),
+                     n_small_components=n_small_comp, faces_before=int(Fc.shape[0]))
+        if n:
+            triangles.prune_triangles(~cand)
+        return n
 
     def finish(self, iteration, scene, triangles, pipe, bg):
         from triangle_renderer import render

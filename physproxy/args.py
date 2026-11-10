@@ -8,7 +8,17 @@ class ProxyParams(ParamGroup):
         self.proxy_start = 20000           # first iteration with SDF steps (triangles mostly opaque by then)
         self.proxy_extra_iters = 0         # SDF-only steps after the TS+ loop (triangles frozen)
         self.proxy_steps_per_iter = 1
-        self.proxy_coupling = "one_way"    # Phase 4a: triangles are detached (4b adds "two_way")
+        self.proxy_coupling = "one_way"    # one_way (4a): triangles detached; two_way (4b): pull + floater pruning below
+        # Phase 4b (two_way only), from proxy_couple_start on
+        self.proxy_couple_start = 23000    # after the SDF has converged (~2.5k steps after proxy_start)
+        self.proxy_pull_w = 0.0            # lambda for mean|f(v)| back-propagated into the vertices (SDF frozen)
+        self.proxy_pull_tau = 0.1          # only vertices in the box with |f| < tau are pulled
+        self.proxy_prune_floaters = False
+        self.proxy_prune_every = 500       # run at iteration % every == every/2 (between upstream's prunes)
+        self.proxy_prune_tau = 0.1         # criterion 1: |f(centroid)| > tau
+        self.proxy_prune_comp_area = 0.05  # criterion 2: on a proxy component with area < this (scene units^2)
+        self.proxy_prune_max_support = 3   # and seen as the visible triangle in <= this many training renders
+        self.proxy_prune_mesh_res = 256    # marching cubes resolution for the component test
         # Field and box
         self.proxy_init = "plane_ground"   # plane_ground | plane_center | sphere | none
         self.proxy_ground_pct = 5.0        # ground height = this percentile of in-box SfM heights
