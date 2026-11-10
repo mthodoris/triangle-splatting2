@@ -238,3 +238,33 @@ Findings:
 - Without decimation, the proxy is about 2.7M faces at MC 384. The 50k budget is a Phase 5 problem.
 
 Next options: a stronger pull (5e-4 to 5e-3, checking that PSNR holds), or skip two-way coupling for now. The floater problem is better handled on the proxy side in Phase 5 (component area threshold plus decimation), so the next step is Phase 5.
+
+## Phase 5 (2026-11-10): collision mesh export
+
+`physproxy/export_collision.py -m MODEL` writes `MODEL/collision/{collision.obj, render.obj, collision_report.json}` in the same frame and units (COLMAP world, scene units). It runs in about 25 s. Steps:
+
+1. Marching cubes at `--res 192`, which gives a 0.058 cell on the 11.2-unit box.
+2. Drop components with area below 0.05: 2,052 → 101 on R0.
+3. pymeshlab quadric edge collapse to `--budget 50000`, topology preserved.
+4. Repair, then orientation.
+5. Two-sided distances, sampled with pymeshlab: against the full-detail proxy (MC 384) and against the in-box render triangles.
+
+Findings while building it:
+- **Topology preservation is required.** Without it, edge collapse on the high-genus foliage destroys the mesh: a 25k request ended at 6.8k faces with large holes. With it, decimation can stall above the budget (MC 192 stalls at about 39k for a 25k request). The fallback re-extracts at a lower MC resolution (192 → 128 → 96 → 64), which has fewer handles.
+- **Non-manifold edges after decimation:** about 10 edges where two sheets touch (4 faces per edge). pymeshlab's "Remove Faces" keeps faces from both sheets, so the hole fill joins them with opposite orientation and creates a non-orientable patch; re-orienting does not fix that. The fix: remove the whole 1-ring of every vertex on a non-2-face edge, then close holes, and repeat (1–2 rounds). After that comes my own BFS parity orientation per shell, flipped to positive volume. One bug found on the way: faces that share two edges summed their parity in the sparse matrix.
+- Tests: `physproxy/tests/test_export_collision.py` has 5 tests covering the component filter, orientation, a glued-boxes non-manifold repair, decimate+repair on a sphere, and the distance helper.
+
+Results (garden, test-free geometry; distances in scene units, p50 / p90 / p99 / max):
+
+| Mesh | Faces | Watertight / manifold / oriented | collision→proxy@384 | render→collision | collision→render |
+|---|---|---|---|---|---|
+| R0, budget 25k (fell back to MC 128) | 24,472 | yes | 0.008 / 0.028 / 0.052 / 0.34 | 0.027 / 0.086 / 0.25 / 0.49 | 0.028 / 0.11 / 0.29 / 0.90 |
+| **R0, budget 50k** | 49,262 | yes | 0.009 / 0.026 / 0.048 / 0.16 | 0.017 / 0.057 / 0.19 / 0.53 | 0.022 / 0.10 / 0.27 / 0.89 |
+| R0, MC 128, budget 50k | 49,414 | yes | 0.007 / 0.023 / 0.038 / 0.13 | 0.023 / 0.067 / 0.21 / 0.43 | 0.026 / 0.11 / 0.28 / 0.91 |
+| R0, budget 100k | 99,032 | yes | 0.006 / 0.019 / 0.030 / 0.085 | 0.014 / 0.046 / 0.14 / 0.45 | 0.021 / 0.10 / 0.27 / 0.90 |
+| R0, budget 200k | 198,930 | yes | 0.004 / 0.016 / 0.027 / 0.088 | 0.013 / 0.041 / 0.12 / 0.42 | 0.020 / 0.10 / 0.27 / 0.92 |
+| R1 (two-way), budget 50k | 49,278 | yes | 0.008 / 0.025 / 0.044 / 0.14 | 0.018 / 0.063 / 0.21 / 0.52 | 0.023 / 0.11 / 0.30 / 0.83 |
+
+- **ε = 0.02 is not met at 50k as a max, nor as a p99.** The median is (0.017). Even 200k faces only reach p99 0.12, so the tail is not mainly a decimation effect. It comes from what the proxy leaves out (thin foliage, render floaters) or smooths over, and from the MC 192 cell (0.058).
+- **The collision→render direction cannot meet any small ε by design.** The proxy closes volumes: object undersides, the ground slab and the box caps have no render surface to match. Its p50 and p90 barely change with the budget.
+- Choosing a meaningful ε check (a percentile instead of the max, render→collision only, or a larger ε) is the user's call; see the summary in the session. All three checks are reported in `collision_report.json["checks"]`.
