@@ -6,7 +6,8 @@ import time
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from physproxy.sdf import SDFField, aabb_from_points  # noqa: E402
+from physproxy.sdf import SDFField  # noqa: E402
+from physproxy.aabb import aabb_from_points, up_frame, oriented_proxy_box  # noqa: E402
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 LO, HI = torch.tensor([-1.0, -0.5, -1.5]), torch.tensor([1.0, 1.5, 0.5])   # non-cubic, off-origin
@@ -99,6 +100,76 @@ def test_aabb_from_points_drops_far_background():
     far = torch.randn(500, 3) * 50                                                       # background / sky
     lo, hi = aabb_from_points(torch.cat([near, far]), cams, pct=(1, 99), radius_mult=1.5, pad=0.0)
     assert (lo > -1.3).all() and (hi < 1.3).all() and (lo < -0.9).all() and (hi > 0.9).all()
+
+
+def _rotation(seed):
+    g = torch.Generator().manual_seed(seed)
+    q, _ = torch.linalg.qr(torch.randn(3, 3, generator=g))
+    return q * torch.sign(torch.det(q))            # proper rotation
+
+
+def test_up_frame_recovers_tilted_up_and_box():
+    # Synthetic scene in a "gravity" frame: a flat 6x3 slab, cameras on a ring
+    # above it; then everything is rotated by a random R into the world.
+    torch.manual_seed(0)
+    Rw = _rotation(3)                               # local -> world
+    pts_l = torch.rand(20000, 3) * torch.tensor([6.0, 3.0, 1.0]) - torch.tensor([3.0, 1.5, 0.0])
+    ang = torch.linspace(0, 6.28, 40)
+    cams_l = torch.stack([4 * ang.cos(), 4 * ang.sin(), torch.full_like(ang, 1.5)], -1)
+    up_l = torch.tensor([0.0, 0.0, 1.0]).expand(40, 3) + 0.05 * torch.randn(40, 3)
+    to_w = lambda a: a @ Rw.T                      # noqa: E731
+    frame, lo, hi = oriented_proxy_box(to_w(pts_l), to_w(cams_l), to_w(up_l), pct=(0, 100), pad=0.0,
+                                       top_to_cameras=False)
+    assert torch.allclose(frame @ frame.T, torch.eye(3), atol=1e-5) and torch.det(frame) > 0
+    assert (frame[2] @ Rw[:, 2]) > 0.99                         # z = up
+    assert abs(frame[0] @ Rw[:, 0]) > 0.99                      # x = long horizontal axis
+    ext = hi - lo
+    assert torch.allclose(ext, torch.tensor([6.0, 3.0, 1.0]), atol=0.1)   # noisy up: ~0.5 deg tilt
+    # Default: the top is raised to the highest camera (z = 1.5 above the slab bottom at 0).
+    _, lo2, hi2 = oriented_proxy_box(to_w(pts_l), to_w(cams_l), to_w(up_l), pct=(0, 100), pad=0.0)
+    assert abs((hi2 - lo2)[2].item() - 1.5) < 0.1
+    # Without up vectors: the ring normal of the camera centres gives the same z (up to sign).
+    f2 = up_frame(None, None, to_w(cams_l))
+    assert abs(f2[2] @ Rw[:, 2]) > 0.99
+
+
+def test_oriented_field_box_mapping_and_isotropic_grid():
+    R = _rotation(1)
+    lo, hi = torch.tensor([-2.0, -1.0, -0.5]), torch.tensor([2.0, 1.0, 0.5])
+    sdf = SDFField(lo, hi, frame=R, base_res=16, n_levels=3, init="plane").to(DEV)
+    assert sdf.grid_shapes == [(16, 8, 4), (32, 16, 8), (64, 32, 16)]
+    assert sdf.grids[-1].shape[2:] == (16, 32, 64)              # [Rz, Ry, Rx]
+    vs = sdf.voxel_size.cpu()
+    assert vs.max() / vs.min() < 1.1                            # about cubic voxels
+    corners = torch.tensor([[a, b, c] for a in (-2.0, 2.0) for b in (-1.0, 1.0) for c in (-0.5, 0.5)])
+    xn = sdf.normalize(sdf.to_world(corners.to(DEV)))
+    assert torch.allclose(xn.abs(), torch.ones_like(xn), atol=1e-5)
+    x = sdf.sample_uniform(5000)
+    assert sdf.inside_aabb(x).all()
+    assert torch.allclose(sdf.init_normal.cpu(), R[2], atol=1e-6)   # plane prior normal = local up
+    # Prior is defined in world units: f(x) = n.x for a world point.
+    assert torch.allclose(sdf(x), x @ sdf.init_normal, atol=1e-5)
+
+
+def test_fit_sphere_in_rotated_box():
+    torch.manual_seed(0)
+    R = _rotation(7).to(DEV)
+    lo, hi = torch.tensor([-1.0, -0.6, -0.4]), torch.tensor([1.0, 0.6, 0.4])
+    sdf = SDFField(lo, hi, frame=R.cpu(), base_res=32, n_levels=3, init="plane").to(DEV)
+    c, r = sdf.to_world(torch.tensor([0.2, 0.0, 0.0], device=DEV)), 0.3
+    target = lambda x: (x - c).norm(dim=-1) - r      # noqa: E731
+    opt = torch.optim.Adam(sdf.param_groups(lr_grid=1e-2, lr_mlp=1e-3))
+    for it in range(1500):
+        x = sdf.sample_uniform(8192)
+        loss = (sdf(x) - target(x)).abs().mean() + 0.1 * ((sdf.gradient(x[:2048]).norm(dim=-1) - 1) ** 2).mean()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        surf = c + r * torch.nn.functional.normalize(torch.randn(5000, 3, device=DEV), dim=-1)
+        err = sdf(surf).abs().mean().item()
+    print(f"rotated-box sphere fit: |f| on surface={err:.4f}")
+    assert err < 0.01
 
 
 if __name__ == "__main__":

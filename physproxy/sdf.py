@@ -26,26 +26,40 @@ import torch.nn.functional as F
 
 
 class SDFField(nn.Module):
-    def __init__(self, aabb_min, aabb_max, base_res=16, n_levels=4, growth=2.0, feat_dim=4,
+    def __init__(self, aabb_min, aabb_max, frame=None, base_res=16, n_levels=4, growth=2.0, feat_dim=4,
                  hidden=64, n_hidden=2, init="sphere", init_radius=0.5, init_center=None,
-                 init_normal=(0.0, 0.0, 1.0), init_offset=0.0, grid_init_std=1e-4, out_scale=None):
+                 init_normal=None, init_offset=0.0, grid_init_std=1e-4, out_scale=None, isotropic=True):
         """
-        aabb_min/aabb_max: [3] scene-unit box (the proxy domain).
+        frame: [3,3] rotation whose ROWS are the box axes in world coordinates
+               (x_local = frame @ x_world). Default identity (axis-aligned box).
+               Use physproxy.aabb.up_frame to get a gravity-aligned box.
+        aabb_min/aabb_max: [3] box corners in the LOCAL frame, scene units.
+        isotropic: per-axis resolution proportional to the box extent so voxels
+               are about cubic; base_res * growth^l is the resolution of the
+               longest axis. False: every axis gets base_res * growth^l.
         init: "sphere" (radius = init_radius * smallest half-extent, centered at
-              init_center or the box center), "plane" (n.x - offset, n points
-              to the outside/free side), or "none" (prior = 0).
+              init_center (world) or the box center), "plane" (n.x - offset in
+              world, n = init_normal or the frame's z axis, pointing to the
+              free/outside side), or "none" (prior = 0).
         out_scale: scene units per MLP output unit (default: smallest half-extent / 4).
         """
         super().__init__()
         aabb_min = torch.as_tensor(aabb_min, dtype=torch.float32)
         aabb_max = torch.as_tensor(aabb_max, dtype=torch.float32)
         assert (aabb_max > aabb_min).all()
+        frame = torch.eye(3) if frame is None else torch.as_tensor(frame, dtype=torch.float32)
+        assert torch.allclose(frame @ frame.T, torch.eye(3), atol=1e-4), "frame must be a rotation"
+        self.register_buffer("frame", frame)
         self.register_buffer("aabb_min", aabb_min)
         self.register_buffer("aabb_max", aabb_max)
-        half = 0.5 * (aabb_max - aabb_min)
+        ext = aabb_max - aabb_min
+        half = 0.5 * ext
         self.resolutions = [int(round(base_res * growth ** l)) for l in range(n_levels)]
+        rel = ext / ext.max() if isotropic else torch.ones(3)
+        # grid_shapes[l] = (Rx, Ry, Rz); grids are stored [1, C, Rz, Ry, Rx] (grid_sample order).
+        self.grid_shapes = [tuple(max(2, int(round(r * float(a)))) for a in rel) for r in self.resolutions]
         self.grids = nn.ParameterList([
-            nn.Parameter(grid_init_std * torch.randn(1, feat_dim, r, r, r)) for r in self.resolutions])
+            nn.Parameter(grid_init_std * torch.randn(1, feat_dim, rz, ry, rx)) for rx, ry, rz in self.grid_shapes])
         layers, d_in = [], feat_dim * n_levels + 3
         for _ in range(n_hidden):
             layers += [nn.Linear(d_in, hidden), nn.Softplus(beta=100)]
@@ -57,24 +71,40 @@ class SDFField(nn.Module):
         self.out_scale = float(out_scale) if out_scale is not None else float(half.min()) / 4
 
         self.init = init
-        center = 0.5 * (aabb_min + aabb_max) if init_center is None else torch.as_tensor(init_center, dtype=torch.float32)
+        center = frame.T @ (0.5 * (aabb_min + aabb_max)) if init_center is None else torch.as_tensor(init_center, dtype=torch.float32)
         self.register_buffer("init_center", center)
         self.init_radius = float(init_radius * half.min())
-        n = torch.as_tensor(init_normal, dtype=torch.float32)
+        n = frame[2] if init_normal is None else torch.as_tensor(init_normal, dtype=torch.float32)
         self.register_buffer("init_normal", n / n.norm())
         self.init_offset = float(init_offset)
 
     # ---- geometry helpers -------------------------------------------------
     @property
     def voxel_size(self):
-        """Finest voxel edge per axis, [3] scene units."""
-        return (self.aabb_max - self.aabb_min) / (self.resolutions[-1] - 1)
+        """Finest voxel edge per local axis, [3] scene units."""
+        return (self.aabb_max - self.aabb_min) / (torch.tensor(self.grid_shapes[-1], device=self.aabb_min.device) - 1)
+
+    def to_local(self, x):
+        return x @ self.frame.T
+
+    def to_world(self, x_local):
+        return x_local @ self.frame
 
     def normalize(self, x):
-        return 2 * (x - self.aabb_min) / (self.aabb_max - self.aabb_min) - 1
+        """World points -> [-1, 1]^3 box coordinates."""
+        return 2 * (self.to_local(x) - self.aabb_min) / (self.aabb_max - self.aabb_min) - 1
 
     def inside_aabb(self, x):
-        return ((x >= self.aabb_min) & (x <= self.aabb_max)).all(dim=-1)
+        xl = self.to_local(x)
+        return ((xl >= self.aabb_min) & (xl <= self.aabb_max)).all(dim=-1)
+
+    def sample_uniform(self, n):
+        """n uniform world points inside the (oriented) box."""
+        u = torch.rand(n, 3, device=self.aabb_min.device)
+        return self.to_world(self.aabb_min + u * (self.aabb_max - self.aabb_min))
+
+    def box_volume(self):
+        return float((self.aabb_max - self.aabb_min).prod())
 
     def prior(self, x):
         if self.init == "sphere":
@@ -124,19 +154,4 @@ class SDFField(nn.Module):
                 {"params": list(self.mlp.parameters()), "lr": lr_mlp, "name": "sdf_mlp"}]
 
 
-def aabb_from_points(points, cam_centers, pct=(2.0, 98.0), radius_mult=1.5, pad=0.05):
-    """Region of interest for the proxy.
-
-    Keeps SfM points within radius_mult * (max camera distance) of the camera
-    centroid (drops sky / far background), takes robust per-axis percentiles,
-    and pads the box by `pad` of its extent. Returns (min [3], max [3]) tensors.
-    """
-    points = torch.as_tensor(points, dtype=torch.float32)
-    cams = torch.as_tensor(cam_centers, dtype=torch.float32)
-    c = cams.mean(0)
-    r = (cams - c).norm(dim=-1).max() * radius_mult
-    p = points[(points - c).norm(dim=-1) <= r]
-    lo = torch.quantile(p, pct[0] / 100, dim=0)
-    hi = torch.quantile(p, pct[1] / 100, dim=0)
-    ext = hi - lo
-    return lo - pad * ext, hi + pad * ext
+from physproxy.aabb import aabb_from_points  # noqa: E402,F401  (kept for compatibility)
