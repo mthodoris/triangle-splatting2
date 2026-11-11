@@ -32,6 +32,10 @@ namespace PhysProxy
         public float rainMaxRadius = 0.08f;
         Vector3 boxSize = new Vector3(6.47f, 2.6f, 5.9f);   // overwritten from meta.json
         public Vector3 BoxSize => boxSize;
+        [Header("Overlay")]
+        public bool showFps = true;
+        float fpsSmoothed;
+        GUIStyle fpsStyle;
         [System.NonSerialized] public bool firstPersonActive;   // set by PhysProxyFirstPerson: Space jumps instead of throwing
 
 #if UNITY_6000_0_OR_NEWER
@@ -129,6 +133,8 @@ namespace PhysProxy
 
         void Update()
         {
+            float dt = Time.unscaledDeltaTime;
+            if (dt > 0f) fpsSmoothed = fpsSmoothed <= 0f ? 1f / dt : Mathf.Lerp(fpsSmoothed, 1f / dt, 0.05f);
             if (KeyC()) colliderRenderer.enabled = !colliderRenderer.enabled;
             for (int k = 0; k < colliders.Length && k < 9; k++)
                 if (KeyDigit(k)) Use(k);
@@ -136,6 +142,14 @@ namespace PhysProxy
                 Spawn(Camera.main.transform.position + Camera.main.transform.forward * 0.5f,
                       Camera.main.transform.forward * throwSpeed, Color.white, ballRadius);
             if (KeyR()) Rain();
+        }
+
+        void OnGUI()
+        {
+            if (!showFps) return;
+            if (fpsStyle == null) fpsStyle = new GUIStyle(GUI.skin.box) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
+            string col = colliders.Length > 0 ? colliders[activeCollider] : "-";
+            GUI.Box(new Rect(10, 10, 330, 32), $" {fpsSmoothed:0} FPS  ({1000f / Mathf.Max(fpsSmoothed, 1e-3f):0.0} ms)   collider: {col}", fpsStyle);
         }
 
         // Box in Unity frame: x in [-sx/2, sx/2], z in [-sz/2, sz/2], y in [0, sy].
