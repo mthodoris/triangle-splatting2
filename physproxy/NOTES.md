@@ -338,3 +338,22 @@ First-milestone status on garden:
   - `PhysProxyBenchmark.cs`: per-collider local physics scenes, sphere drops with continuous collision detection at a fixed step, and straight-line `CharacterController` walks, written to CSV.
 - `unity/summarize.py` turns the CSVs into a table. Setup steps are in `unity/README.md`.
 - **The C# has not been compiled or run:** there is no Unity on this machine. Waiting for a run on the user's side.
+
+## Phase 7 first results (2026-11-11): Unity 6000.5 (URP), garden R0
+
+Setup: the user's project is `/data/manousis/physproxy`. The run used the default benchmark settings: 2,000 sphere drops (r 0.05 m, continuous collision detection, fixed step 0.01 s, 4 s) and 300 capsule walks (r 0.2 m, h 1 m, 1 m/s, 12 s). CSVs and `summary.json` are in `output/physproxy/p4b_R0_oneway/unity_results/`. Summary: `python unity/summarize.py DIR --meta MODEL/unity/meta.json`.
+
+**First run: export bug.** In Unity our collision mesh's faces pointed inward. Spheres passed the ground from above and rested on the inside of the box floor, and 58% of walkers got stuck. Fixed by reversing triangle order in `export_for_unity.py` (commit 568eecc). Results below are from the corrected run.
+
+| Collider | Fell through | Rolled off the scene edge | Rest within 5 cm of visible surface* | Walks reached / stuck / fell |
+|---|---|---|---|---|
+| **ours** (48,852 faces, watertight) | **0.2%** (5; 3 of them started inside the collider) | 0.4% | 79% (21% higher, 0% lower; n = 53) | **95.7%** / 4.3% / 0% |
+| naive cleanup (50k) | 31.8% | 5.5% | 91% (9% lower; n = 218) | 90.0% / 8.7% / 1.3% |
+| render triangles as-is (237k) | 3.5% | 0.6% | 94% (5% higher; n = 324) | 91.7% / 8.3% / 0% |
+
+\* Only spheres that stayed within 5 cm of their start point horizontally, since otherwise the visible surface below the start is not where they rest. On our smooth collider most spheres roll away, so n is small.
+
+- **The engine agrees with Phase 6.** Ours almost never lets things fall through, naive is far worse than the raw render triangles (decimating a soup opens gaps), and the soup itself leaks about 4%.
+- **Walking is best on ours** (95.7% reach the goal). On the triangle-based colliders, capsules get stuck more often on small steps and edges.
+- **Ours rests a bit high:** 21% of the stationary spheres rest more than 5 cm above the visible surface. That is the 0.015 skin plus grass and leaves smoothed into the volume. The median is +1.3 cm.
+- **Not yet checked:** the scale (1 unit = 1 m is assumed), and the viewer's look under URP. The viewer ran; whether it looked right is still to be confirmed with the user.
