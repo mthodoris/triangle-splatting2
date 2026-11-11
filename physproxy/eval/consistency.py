@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 6: "what you see is what you hit" on test views, for several colliders at once.
+"""Phase 6: "what you see is what you hit" on test (or training) views, for several colliders at once.
 
 For every pixel whose visible render surface (exact TS+ depth) lies in the proxy box, the collider's
 z-buffer depth is compared with the rendered depth (relative tolerance `--tol`):
@@ -33,6 +33,9 @@ def main():
     parser.add_argument("--iteration", type=int, default=-1)
     parser.add_argument("--sdf", required=True, help="sdf_<it>.pt (box and frame)")
     parser.add_argument("--mesh", nargs="+", required=True, help="name=path of each collider")
+    parser.add_argument("--split", default="test", choices=["test", "train"],
+                        help="train: for choosing settings (e.g. the skin) without looking at the test views")
+    parser.add_argument("--every", type=int, default=1, help="use every k-th view of the split")
     parser.add_argument("--scale", type=int, default=2)
     parser.add_argument("--tol", type=float, default=0.02)
     parser.add_argument("--save_images", type=int, default=4)
@@ -48,13 +51,15 @@ def main():
         tri = TriangleModel(dataset.sh_degree)
         scene = Scene(dataset, tri, None, None, load_iteration=args.iteration, shuffle=False)
         tri.scaling = args.scale
-        cams = scene.getTestCameras()
+        cams = scene.getTestCameras() if args.split == "test" else scene.getTrainCameras()
+        cams = cams[::args.every]
+        res["split"], res["views"] = args.split, len(cams)
         for spec in args.mesh:
             name, path = spec.split("=", 1)
             PV, PF = load_obj_mesh(path)
             out_dir = os.path.join(os.path.dirname(path), f"views_{name}")
             s = compare_views(cams, tri, pipe, PV, PF, frame, lo, hi, tol=args.tol, out_dir=out_dir,
-                              save_images=args.save_images)
+                              save_images=args.save_images if args.split == "test" else 0)
             s.pop("per_view", None)
             res["results"][name] = dict(path=path, faces=int(PF.shape[0]), **s)
             print(f"[consistency] {name:>10} ({PF.shape[0]} faces): agree {s['agree']:.4f}  blocks {s['blocks']:.4f}"
