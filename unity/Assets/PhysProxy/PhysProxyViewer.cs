@@ -1,6 +1,6 @@
 // physproxy Phase 7: interactive viewer. Render mesh as the visual, one collider as a static MeshCollider.
 // Play mode: Space throws a ball from the main camera; R rains balls over the whole box;
-// C toggles showing the collider; 1/2/3 switch collider.
+// C toggles showing the collider; 1/2/3 switch collider. F: first person (PhysProxyFirstPerson).
 using System.Collections.Generic;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -31,6 +31,8 @@ namespace PhysProxy
         public float rainMinRadius = 0.03f;
         public float rainMaxRadius = 0.08f;
         Vector3 boxSize = new Vector3(6.47f, 2.6f, 5.9f);   // overwritten from meta.json
+        public Vector3 BoxSize => boxSize;
+        [System.NonSerialized] public bool firstPersonActive;   // set by PhysProxyFirstPerson: Space jumps instead of throwing
 
 #if UNITY_6000_0_OR_NEWER
         PhysicsMaterial ballMat;
@@ -130,7 +132,7 @@ namespace PhysProxy
             if (KeyC()) colliderRenderer.enabled = !colliderRenderer.enabled;
             for (int k = 0; k < colliders.Length && k < 9; k++)
                 if (KeyDigit(k)) Use(k);
-            if (KeySpace() && Camera.main != null)
+            if (KeySpace() && Camera.main != null && !firstPersonActive)
                 Spawn(Camera.main.transform.position + Camera.main.transform.forward * 0.5f,
                       Camera.main.transform.forward * throwSpeed, Color.white, ballRadius);
             if (KeyR()) Rain();
@@ -151,7 +153,7 @@ namespace PhysProxy
             Debug.Log($"[physproxy] rain: {rainCount} balls over {boxSize.x:0.0} x {boxSize.z:0.0} m");
         }
 
-        void Spawn(Vector3 pos, Vector3 vel, Color color, float radius)
+        public void Spawn(Vector3 pos, Vector3 vel, Color color, float radius)
         {
             var b = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             b.transform.localScale = Vector3.one * (2 * radius);
