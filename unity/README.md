@@ -29,7 +29,7 @@ This writes `MODEL/unity/`, about 20 MB:
 
 1. Copy `unity/Assets/PhysProxy/` into your project's `Assets/`.
 2. Copy `MODEL/unity/*` into `Assets/StreamingAssets/physproxy/garden/`.
-3. **Viewer:** add an empty GameObject with `PhysProxyViewer`, then press Play. Space throws a ball from the camera, C shows or hides the collider, and 1/2/3 switch between collision, naive and soup. Put the camera somewhere around (0, 1.5, −4) looking at the table.
+3. **Viewer:** add an empty GameObject with `PhysProxyViewer`, then press Play. Space throws a ball from the camera, R drops a rain of 50 balls over the whole box, C shows or hides the collider, and 1/2/3 switch between collision, naive and soup. Put the camera somewhere around (0, 1.5, −4) looking at the table.
 4. **Benchmark:** add an empty GameObject with `PhysProxyBenchmark` and press Play. The Console reports each step, and the CSVs go to `Application.persistentDataPath` unless `outputFolder` is set.
 
 ## 3. Summarise

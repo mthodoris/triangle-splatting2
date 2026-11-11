@@ -1,5 +1,6 @@
 // physproxy Phase 7: interactive viewer. Render mesh as the visual, one collider as a static MeshCollider.
-// Play mode: Space throws a ball from the main camera; C toggles showing the collider; 1/2/3 switch collider.
+// Play mode: Space throws a ball from the main camera; R rains balls over the whole box;
+// C toggles showing the collider; 1/2/3 switch collider.
 using System.Collections.Generic;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -16,6 +17,16 @@ namespace PhysProxy
         public int activeCollider = 0;
         public float ballRadius = 0.08f;
         public float throwSpeed = 4f;
+
+        [Header("Rain (R key)")]
+        public int rainCount = 50;
+        [Tooltip("Balls start between top-of-box + this and + this + rainSpread (m)")]
+        public float rainHeightAboveBox = 0.5f;
+        public float rainSpread = 1.0f;
+        public bool rainRandomColors = true;
+        Vector3 boxSize = new Vector3(6.47f, 2.6f, 5.9f);   // overwritten from meta.json
+
+        [System.Serializable] class Meta { public float[] box_size_unity; }
 
         GameObject visual, colliderGo;
         MeshRenderer colliderRenderer;
@@ -41,6 +52,13 @@ namespace PhysProxy
             colliderRenderer.enabled = false;
             colliderGo.AddComponent<MeshCollider>();
             Use(activeCollider);
+            try
+            {
+                var meta = JsonUtility.FromJson<Meta>(System.IO.File.ReadAllText(PpmMesh.DataPath(dataFolder, "meta.json")));
+                if (meta.box_size_unity != null && meta.box_size_unity.Length == 3)
+                    boxSize = new Vector3(meta.box_size_unity[0], meta.box_size_unity[1], meta.box_size_unity[2]);
+            }
+            catch (System.Exception e) { Debug.LogWarning($"[physproxy] meta.json not read, using default box size: {e.Message}"); }
         }
 
         Mesh Get(string name)
@@ -82,6 +100,12 @@ namespace PhysProxy
 #else
             Input.GetKeyDown(KeyCode.Space);
 #endif
+        static bool KeyR() =>
+#if ENABLE_INPUT_SYSTEM
+            Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame;
+#else
+            Input.GetKeyDown(KeyCode.R);
+#endif
         static bool KeyDigit(int k) =>   // k = 0 -> "1"
 #if ENABLE_INPUT_SYSTEM
             Keyboard.current != null && Keyboard.current[(Key)((int)Key.Digit1 + k)].wasPressedThisFrame;
@@ -95,20 +119,40 @@ namespace PhysProxy
             for (int k = 0; k < colliders.Length && k < 9; k++)
                 if (KeyDigit(k)) Use(k);
             if (KeySpace() && Camera.main != null)
+                Spawn(Camera.main.transform.position + Camera.main.transform.forward * 0.5f,
+                      Camera.main.transform.forward * throwSpeed, Color.white);
+            if (KeyR()) Rain();
+        }
+
+        // Box in Unity frame: x in [-sx/2, sx/2], z in [-sz/2, sz/2], y in [0, sy].
+        void Rain()
+        {
+            for (int i = 0; i < rainCount; i++)
             {
-                var b = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                b.transform.localScale = Vector3.one * (2 * ballRadius);
-                b.transform.position = Camera.main.transform.position + Camera.main.transform.forward * 0.5f;
-                var rb = b.AddComponent<Rigidbody>();
-                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-#if UNITY_6000_0_OR_NEWER
-                rb.linearVelocity = Camera.main.transform.forward * throwSpeed;
-#else
-                rb.velocity = Camera.main.transform.forward * throwSpeed;
-#endif
-                balls.Add(b);
-                if (balls.Count > 200) { Destroy(balls[0]); balls.RemoveAt(0); }
+                var p = new Vector3(Random.Range(-0.5f, 0.5f) * boxSize.x,
+                                    boxSize.y + rainHeightAboveBox + Random.Range(0f, rainSpread),
+                                    Random.Range(-0.5f, 0.5f) * boxSize.z);
+                var c = rainRandomColors ? Color.HSVToRGB(Random.value, 0.8f, 1f) : Color.white;
+                Spawn(p, Vector3.zero, c);
             }
+            Debug.Log($"[physproxy] rain: {rainCount} balls over {boxSize.x:0.0} x {boxSize.z:0.0} m");
+        }
+
+        void Spawn(Vector3 pos, Vector3 vel, Color color)
+        {
+            var b = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            b.transform.localScale = Vector3.one * (2 * ballRadius);
+            b.transform.position = pos;
+            b.GetComponent<Renderer>().material.color = color;
+            var rb = b.AddComponent<Rigidbody>();
+            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+#if UNITY_6000_0_OR_NEWER
+            rb.linearVelocity = vel;
+#else
+            rb.velocity = vel;
+#endif
+            balls.Add(b);
+            while (balls.Count > 300) { Destroy(balls[0]); balls.RemoveAt(0); }
         }
     }
 }
