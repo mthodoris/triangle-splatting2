@@ -103,7 +103,7 @@ namespace PhysProxy
                     float rest = e.y - sphereRadius - r["ref_land_y"];
                     float drift = new Vector2(e.x - r["x"], e.z - r["z"]).magnitude;
                     sb.AppendLine(string.Join(",", F(r["id"]), F(r["x"]), F(r["y"]), F(r["z"]), F(r["ref_land_y"]), overlap ? "1" : "0",
-                        F(e.x), F(e.y), F(e.z), F(rest), F(drift), f ? "1" : "0", F(rb.velocity.magnitude)));
+                        F(e.x), F(e.y), F(e.z), F(rest), F(drift), f ? "1" : "0", F(Speed(rb))));
                 }
                 yield return SceneManager.UnloadSceneAsync(scene);
             }
@@ -163,6 +163,13 @@ namespace PhysProxy
             File.WriteAllText(path, sb.ToString());
             Debug.Log($"[physproxy] walk {name}: reached {reached}, stuck {stuck}, fell {fell} of {walks.Count} -> {path}");
         }
+
+        static float Speed(Rigidbody rb) =>
+#if UNITY_6000_0_OR_NEWER
+            rb.linearVelocity.magnitude;
+#else
+            rb.velocity.magnitude;
+#endif
 
         static string F(float v) => v.ToString("0.#####", Inv);
 

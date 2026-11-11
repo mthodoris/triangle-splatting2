@@ -2,7 +2,7 @@
 
 These scripts load a trained scene into Unity: the render mesh as the visual, and a collision mesh as a static `MeshCollider`. They then run repeatable drop and walking tests against several colliders and write CSV files.
 
-They were written without access to a Unity install. They use only stable APIs: local physics scenes and `CharacterController`, both available since 2018.3. Expect Unity 2021 LTS or newer with the Built-in render pipeline. On Unity 6, `Rigidbody.velocity` gives an obsolete-API warning but works.
+They were written without access to a Unity install. They use only stable APIs: local physics scenes and `CharacterController`, both available since 2018.3. They target Unity 2021 LTS or newer, including Unity 6 with URP (the user's project is 6000.5 + URP). They support both the new Input System and the legacy Input Manager, and use `linearVelocity` on Unity 6.
 
 ## 1. Export on the training machine
 

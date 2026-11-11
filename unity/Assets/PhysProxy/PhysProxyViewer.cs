@@ -2,6 +2,9 @@
 // Play mode: Space throws a ball from the main camera; C toggles showing the collider; 1/2/3 switch collider.
 using System.Collections.Generic;
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
 namespace PhysProxy
 {
@@ -66,19 +69,43 @@ namespace PhysProxy
             Debug.Log($"[physproxy] collider = {colliders[activeCollider]} ({m.triangles.Length / 3} triangles)");
         }
 
+        // Works with the new Input System (Unity 6 default) and with the legacy Input Manager.
+        static bool KeyC() =>
+#if ENABLE_INPUT_SYSTEM
+            Keyboard.current != null && Keyboard.current.cKey.wasPressedThisFrame;
+#else
+            Input.GetKeyDown(KeyCode.C);
+#endif
+        static bool KeySpace() =>
+#if ENABLE_INPUT_SYSTEM
+            Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame;
+#else
+            Input.GetKeyDown(KeyCode.Space);
+#endif
+        static bool KeyDigit(int k) =>   // k = 0 -> "1"
+#if ENABLE_INPUT_SYSTEM
+            Keyboard.current != null && Keyboard.current[(Key)((int)Key.Digit1 + k)].wasPressedThisFrame;
+#else
+            Input.GetKeyDown(KeyCode.Alpha1 + k);
+#endif
+
         void Update()
         {
-            if (Input.GetKeyDown(KeyCode.C)) colliderRenderer.enabled = !colliderRenderer.enabled;
+            if (KeyC()) colliderRenderer.enabled = !colliderRenderer.enabled;
             for (int k = 0; k < colliders.Length && k < 9; k++)
-                if (Input.GetKeyDown(KeyCode.Alpha1 + k)) Use(k);
-            if (Input.GetKeyDown(KeyCode.Space) && Camera.main != null)
+                if (KeyDigit(k)) Use(k);
+            if (KeySpace() && Camera.main != null)
             {
                 var b = GameObject.CreatePrimitive(PrimitiveType.Sphere);
                 b.transform.localScale = Vector3.one * (2 * ballRadius);
                 b.transform.position = Camera.main.transform.position + Camera.main.transform.forward * 0.5f;
                 var rb = b.AddComponent<Rigidbody>();
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+#if UNITY_6000_0_OR_NEWER
+                rb.linearVelocity = Camera.main.transform.forward * throwSpeed;
+#else
                 rb.velocity = Camera.main.transform.forward * throwSpeed;
+#endif
                 balls.Add(b);
                 if (balls.Count > 200) { Destroy(balls[0]); balls.RemoveAt(0); }
             }
