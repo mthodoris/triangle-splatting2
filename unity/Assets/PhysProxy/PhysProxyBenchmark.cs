@@ -4,7 +4,7 @@
 //   Walk test  - a CharacterController capsule walks a straight line from start to goal (walks.csv)
 //                with gravity; logs reached / stuck / fell through.
 // No randomness: inputs come from the CSVs and the timestep is fixed, so runs are repeatable.
-// Output: <outputFolder>/drops_<collider>.csv, walks_<collider>.csv (default: Application.persistentDataPath).
+// Output: <outputFolder>/drops_<collider>_r<cm>cm.csv (one per sphere radius), walks_<collider>.csv (default: Application.persistentDataPath).
 // Summarise with: python unity/summarize.py <outputFolder>
 using System.Collections;
 using System.Collections.Generic;
@@ -23,12 +23,14 @@ namespace PhysProxy
         public string outputFolder = "";
 
         [Header("Drop test")]
-        public float sphereRadius = 0.05f;
+        [Tooltip("One drop run per radius (metres); output drops_<collider>_r<cm>cm.csv")]
+        public float[] sphereRadii = { 0.01f, 0.02f, 0.05f };
         public float dropSeconds = 4f;
         public int dropBatch = 500;
         public CollisionDetectionMode detection = CollisionDetectionMode.ContinuousDynamic;
 
         [Header("Walk test")]
+        public bool runWalks = true;
         public float capsuleRadius = 0.2f;
         public float capsuleHeight = 1.0f;
         public float stepOffset = 0.15f;
@@ -52,8 +54,13 @@ namespace PhysProxy
             foreach (var name in colliders)
             {
                 var mesh = PpmMesh.Load(PpmMesh.DataPath(dataFolder, name + ".ppm"), name);
-                yield return RunDrops(name, mesh, drops, Path.Combine(outDir, $"drops_{name}.csv"));
-                yield return RunWalks(name, mesh, walks, Path.Combine(outDir, $"walks_{name}.csv"));
+                foreach (var radius in sphereRadii)
+                {
+                    string cm = (radius * 100f).ToString("0.##", Inv);
+                    yield return RunDrops(name, mesh, drops, radius, Path.Combine(outDir, $"drops_{name}_r{cm}cm.csv"));
+                }
+                if (runWalks)
+                    yield return RunWalks(name, mesh, walks, Path.Combine(outDir, $"walks_{name}.csv"));
             }
             Debug.Log($"[physproxy] benchmark done; CSVs in {outDir}");
         }
@@ -67,7 +74,7 @@ namespace PhysProxy
             return scene;
         }
 
-        IEnumerator RunDrops(string name, Mesh mesh, List<Dictionary<string, float>> drops, string path)
+        IEnumerator RunDrops(string name, Mesh mesh, List<Dictionary<string, float>> drops, float sphereRadius, string path)
         {
             var sb = new StringBuilder("id,start_x,start_y,start_z,ref_land_y,started_overlapping,end_x,end_y,end_z,rest_minus_ref,drift_xz,fell_through,end_speed\n");
             int fell = 0;
@@ -108,7 +115,7 @@ namespace PhysProxy
                 yield return SceneManager.UnloadSceneAsync(scene);
             }
             File.WriteAllText(path, sb.ToString());
-            Debug.Log($"[physproxy] drop {name}: {fell}/{drops.Count} fell through -> {path}");
+            Debug.Log($"[physproxy] drop {name} r={sphereRadius * 100f:0.##} cm: {fell}/{drops.Count} below the floor -> {path}");
         }
 
         IEnumerator RunWalks(string name, Mesh mesh, List<Dictionary<string, float>> walks, string path)
