@@ -384,3 +384,5 @@ These replace the 1-unit-=-1-m table above, whose CSVs are kept in `unity_result
 - **At true scale, 5 cm spheres rarely find the soup's gaps (0.4%).** Phase 6 rays (zero radius) found 2.3%, so the soup's leaks matter for small or thin objects. A sphere-radius sweep would show where the soup starts to leak.
 - **Walking is a tie (90–92%) at true scale.** The 1.7×-too-large scene had favoured ours.
 - So at true scale, ours vs the render soup is about collider quality more than leak rate: closed and manifold, 5× fewer faces, the same contact behavior, no leaks for small objects.
+
+Repeatability: a second Play run with the same settings (11:47) produced bit-identical drop CSVs for all three colliders. For walks, the outcomes (reached / stuck / fell) were identical in all 900 walks; only 3 stuck walks differed, in their final distance and path length, by 1–11 cm. The likely cause is small CharacterController differences between runs. The reported rates are unaffected.
