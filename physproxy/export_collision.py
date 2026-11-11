@@ -207,8 +207,8 @@ def write_obj(path, v, f):
         np.savetxt(fh, f + 1, fmt="f %d %d %d")
 
 
-def mc_mesh(sdf, res, min_area):
-    v, f = extract_mesh(sdf, res=res)
+def mc_mesh(sdf, res, min_area, level=0.0):
+    v, f = extract_mesh(sdf, res=res, level=level)
     v, f = v.double().cpu().numpy(), f.cpu().numpy()
     return drop_small_components(v, f, min_area)
 
@@ -225,6 +225,9 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--res", type=int, default=192, help="MC resolution for the collision mesh")
     ap.add_argument("--ref_res", type=int, default=384, help="MC resolution of the full-detail reference proxy")
+    ap.add_argument("--iso", type=float, default=0.015,
+                    help="extract f = iso: an outward skin of this thickness (scene units) that keeps thin parts "
+                         "(table tops) from breaking apart in decimation")
     ap.add_argument("--min_comp_area", type=float, default=0.05)
     ap.add_argument("--budget", type=int, default=50000)
     ap.add_argument("--eps", type=float, default=0.02, help="tolerance (scene units), reported against max and p99")
@@ -242,7 +245,7 @@ def main():
     ext = float((sdf.aabb_max - sdf.aabb_min).max())
     # Lower the MC resolution until topology-preserving decimation reaches the budget (fewer handles).
     for res in sorted({a.res, int(a.res / 1.5), a.res // 2, a.res // 3}, reverse=True):
-        v, f, comp = mc_mesh(sdf, res, a.min_comp_area)
+        v, f, comp = mc_mesh(sdf, res, a.min_comp_area, a.iso)
         print(f"[collision] MC {res}: components {comp['components_before']} -> {comp['components_kept']}, "
               f"{f.shape[0]} faces kept")
         vd, fd = decimate(v, f, a.budget)

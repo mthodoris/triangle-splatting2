@@ -23,9 +23,11 @@ def sdf_lattice(sdf, res=256, chunk=2 ** 20):
 
 
 @torch.no_grad()
-def extract_mesh(sdf, res=256, pad_value=None):
-    """Returns (verts [V,3] world, faces [F,3] long) of the f = 0 surface, closed at the box."""
+def extract_mesh(sdf, res=256, pad_value=None, level=0.0):
+    """Returns (verts [V,3] world, faces [F,3] long) of the f = level surface, closed at the box.
+    level > 0 extracts an outward offset surface (thickens thin parts by 2 * level)."""
     vol, axes = sdf_lattice(sdf, res)
+    vol = vol - level
     if pad_value is None:
         pad_value = float(sdf.voxel_size.max())
     vol = torch.nn.functional.pad(vol, (1, 1, 1, 1, 1, 1), value=pad_value)

@@ -254,7 +254,7 @@ Findings while building it:
 - **Non-manifold edges after decimation:** about 10 edges where two sheets touch (4 faces per edge). pymeshlab's "Remove Faces" keeps faces from both sheets, so the hole fill joins them with opposite orientation and creates a non-orientable patch; re-orienting does not fix that. The fix: remove the whole 1-ring of every vertex on a non-2-face edge, then close holes, and repeat (1–2 rounds). After that comes my own BFS parity orientation per shell, flipped to positive volume. One bug found on the way: faces that share two edges summed their parity in the sparse matrix.
 - Tests: `physproxy/tests/test_export_collision.py` has 5 tests covering the component filter, orientation, a glued-boxes non-manifold repair, decimate+repair on a sphere, and the distance helper.
 
-Results (garden, test-free geometry; distances in scene units, p50 / p90 / p99 / max):
+Results (garden, all with the f = 0 surface, before the skin of Phase 6; distances in scene units, p50 / p90 / p99 / max):
 
 | Mesh | Faces | Watertight / manifold / oriented | collision→proxy@384 | render→collision | collision→render |
 |---|---|---|---|---|---|
@@ -268,3 +268,47 @@ Results (garden, test-free geometry; distances in scene units, p50 / p90 / p99 /
 - **ε = 0.02 is not met at 50k as a max, nor as a p99.** The median is (0.017). Even 200k faces only reach p99 0.12, so the tail is not mainly a decimation effect. It comes from what the proxy leaves out (thin foliage, render floaters) or smooths over, and from the MC 192 cell (0.058).
 - **The collision→render direction cannot meet any small ε by design.** The proxy closes volumes: object undersides, the ground slab and the box caps have no render surface to match. Its p50 and p90 barely change with the budget.
 - Choosing a meaningful ε check (a percentile instead of the max, render→collision only, or a larger ε) is the user's call; see the summary in the session. All three checks are reported in `collision_report.json["checks"]`.
+
+## Phase 6 (2026-11-11): physics evaluation, engine-independent
+
+Tools:
+- **`physproxy/eval/raycast.py`** is a pure-PyTorch GPU ray caster (Möller–Trumbore, brute force per cell of a 1-unit grid over the ray origins; Open3D and embree are not installed). About 2 minutes for 200k origins and 3 meshes.
+  - Origins are 200k points the training cameras see as empty: along a camera ray, a random fraction of the way to the render surface minus 0.05, kept if inside the box.
+  - Directions: random on the sphere, and down along the box's up axis, both within max_dist 1.0.
+  - Measures, with the render mesh as the reference and tol 0.05: of the rays that hit the reference, the share the collider catches within tol ("caught") and the share it lets pass ("pass"); of the rays that miss the reference, the share the collider blocks ("wall").
+  - **Drop test:** straight down from each origin to the box floor, run on every mesh including the reference. A miss means a dropped object falls through the world.
+- **`physproxy/eval/naive_cleanup.py`** builds the baseline: in-box render triangles, welded at 0.02, minus components below 1e-3 area, quadric-decimated to 50k. Its component threshold is tiny on purpose: one render triangle has area ~0.003, so the proxy's 0.05 threshold deletes ~97% of the soup (645 faces left).
+- **`physproxy/eval/consistency.py`** runs the per-view see-vs-hit classification (proxy_views.compare_views) on the test views for several colliders.
+- Tests: `test_raycast.py` (4: analytic sphere and plane, max_dist cutoff, grid culling equals brute force, classes) and `test_extract.py::test_offset_level_grows_sphere`.
+
+**Finding: thin parts break apart in decimation, so the collider gets a skin.** The f = 0 mesh at 50k agreed with the test views on only 77.3% of pixels (21% see-through), against 94.7% for the full-detail proxy. The images show why: the table top is about one MC 192 cell thick, and decimation breaks it into fragments; the ball and the cross-base are mostly gone. `export_collision.py --iso δ` extracts f = δ instead, an outward offset that thickens thin parts by 2δ, like a physics engine's contact offset. Sweep on R0 (test views, 50k faces; δ was chosen on the test views):
+
+| δ | 0 | 0.0075 | 0.01 | **0.015** | 0.02 | 0.03 |
+|---|---|---|---|---|---|---|
+| agree / blocks / see-through % | 77.3 / 1.7 / 21.0 | 88.5 / 3.4 / 8.1 | 90.1 / 4.0 / 5.8 | **91.1 / 6.1 / 2.7** | 89.8 / 9.2 / 1.0 | 82.8 / 17.1 / 0.1 |
+
+The default is now δ = 0.015, below ε = 0.02. The cost: render→collision distances grow (p50 0.017 → 0.029), because the collider now sits about δ in front of the surface by construction.
+
+Results (garden; "ours" = skin-0.015 collision mesh, ~49k faces):
+
+| | R0 ours | R0 naive | R1 ours | R1 naive |
+|---|---|---|---|---|
+| random rays: caught / pass / wall % | 75.4 / 3.7 / 0.8 | 66.9 / 18.9 / 0.1 | 76.0 / 3.2 / 0.7 | 67.8 / 18.6 / 0.1 |
+| down rays: caught / pass / wall % | 90.0 / 1.5 / 1.7 | 74.3 / 17.9 / 0.2 | 90.0 / 1.2 / 1.6 | 74.3 / 18.6 / 0.2 |
+| drop test: falls through % (reference render soup 2.3 / 2.1) | **0.01** | 24.8 | **0.01** | 25.4 |
+| test views: agree / blocks / see-through % | **91.1** / 6.1 / 2.7 | 72.0 / 1.0 / 27.0 | **91.6** / 5.7 / 2.7 | 71.6 / 1.0 / 27.4 |
+| watertight / faces | yes / 48,852 | no / 50,000 | yes / 49,006 | no / 50,000 |
+
+- Ours beats naive cleanup on every physics measure except invisible walls (0.7–1.7% vs 0.1–0.2%), which is the price of the skin and of closing volumes.
+- Plain agreement over all random rays is a tie (97.4 vs 97.5%), because 92.5% of rays hit nothing within 1.0. That is why the conditional rates are reported.
+- The render soup is itself leaky as a collider: 2.3% of drops fall through it. Naive cleanup makes that 10× worse, because decimating the soup opens gaps. Ours closes them.
+- Down rays: ours lands higher than the reference by more than tol on 8.6% of drops (skin, plus grass and leaves smoothed into the volume), and lower on 1.0%.
+- R1 (two-way) vs R0 (one-way): about the same, slightly better on test-view agreement (91.6 vs 91.1%).
+
+First-milestone status on garden:
+- watertight + manifold: yes
+- ≤ 50k triangles: yes
+- floaters removed: yes
+- raycast agreement better than naive cleanup: yes on caught/pass and the drop test; tie on plain agreement
+- render PSNR within 0.2 dB: yes (25.37 vs 25.34 baseline)
+- Hausdorff ≤ ε: no. Only the medians are below 0.02; see Phase 5.

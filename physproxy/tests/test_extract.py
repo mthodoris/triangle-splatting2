@@ -32,6 +32,16 @@ def test_sphere_in_rotated_box():
     assert ((v - sdf.init_center).norm(dim=-1) - r).abs().max() < 0.01                   # world frame
 
 
+def test_offset_level_grows_sphere():
+    lo, hi = torch.tensor([-1.0, -1.0, -1.0]), torch.tensor([1.0, 1.0, 1.0])
+    sdf = SDFField(lo, hi, init="sphere", init_radius=0.8).to(DEV)
+    r = sdf.init_radius
+    v, f = extract_mesh(sdf, res=128, level=0.05)        # outward skin of 0.05
+    s = mesh_stats(v.double().cpu().numpy(), f.cpu().numpy())
+    assert s["watertight"] and s["winding_consistent"]
+    assert ((v - sdf.init_center).norm(dim=-1) - (r + 0.05)).abs().max() < 0.01
+
+
 def test_ground_plane_becomes_closed_slab():
     R = _rotation(2)
     lo, hi = torch.tensor([-2.0, -1.0, -1.0]), torch.tensor([2.0, 1.0, 1.0])
