@@ -366,3 +366,21 @@ Setup: the user's project is `/data/manousis/physproxy`. The run used the defaul
 - Check: the table is 1.35 units tall and about 3.1 across, which is 0.78 m and 1.8 m.
 
 `export_for_unity.py` now takes its scale from `MODEL/metric_scale.json`. The garden box in Unity is 6.5 × 2.6 × 5.9 m. The first Unity results (Phase 7 above) used 1 unit = 1 m, so they are re-run at the measured scale.
+
+## Phase 7 results at the measured scale (2026-11-11, 0.579 m/unit)
+
+These replace the 1-unit-=-1-m table above, whose CSVs are kept in `unity_results/scale1_bugfixed/`. Same benchmark settings: spheres r = 5 cm, capsule r = 0.2 m, h = 1 m.
+
+| Collider | Fell through | Rolled off the scene edge | Rest within 5 cm* (above / below) | Walks reached / stuck / fell |
+|---|---|---|---|---|
+| **ours** (48,852 faces, watertight) | **0.1%** (2, both started inside the collider) | 0.2% | 93.4% (5.5 / 1.1; n = 91) | 91.7% / 8.3% / 0% |
+| naive cleanup (50k) | **16.2%** | 5.0% | 95.9% (0.3 / 3.9; n = 388) | 91.3% / 8.7% / 0% |
+| render triangles as-is (237k, not watertight) | 0.4% | 0.4% | 97.8% (2.0 / 0.2; n = 493) | 90.0% / 10.0% / 0% |
+
+\* Spheres that stayed within 5 cm horizontally of their start. Median rest offset: ours +0.7 cm, soup +0.1 cm, naive −1.0 cm.
+
+- **Ours:** no real fall-throughs, and the sphere rest height is within a centimetre or two of the visible surface (skin 0.015 units = 0.9 cm).
+- **Naive cleanup still leaks:** 16% of drops fall through.
+- **At true scale, 5 cm spheres rarely find the soup's gaps (0.4%).** Phase 6 rays (zero radius) found 2.3%, so the soup's leaks matter for small or thin objects. A sphere-radius sweep would show where the soup starts to leak.
+- **Walking is a tie (90–92%) at true scale.** The 1.7×-too-large scene had favoured ours.
+- So at true scale, ours vs the render soup is about collider quality more than leak rate: closed and manifold, 5× fewer faces, the same contact behavior, no leaks for small objects.

@@ -12,7 +12,7 @@ Rendering metrics are on the 24 test views (`--eval`, every 8th image) via `rend
 | garden `images_8` | **Phase 6 collision mesh from R0, skin 0.015** (`--iso 0.015`, default) | (this commit) | 25.37 | 0.800 | 0.192 | **48,852** | 47 | — | 0 | 0 | **yes** | render→collision p50 0.029 / p90 0.071 / p99 0.11 / max 0.41 | random rays: of ref hits caught 75.4 %, pass 3.7 %; down: caught 90.0 %; drop falls through 0.01 %; test-view agree 91.1 % |
 | garden `images_8` | Phase 6 naive cleanup of R0 render mesh (weld 0.02, crumbs < 1e-3, decimate 50k) | (this commit) | — | | | 50,000 | 20,920 | — | 93,836 (79.7 %) | 5,675 | no | — | random rays: caught 66.9 %, pass 18.9 %; down: caught 74.3 %; drop falls through 24.8 %; test-view agree 72.0 % |
 | garden `images_8` | Phase 6 collision mesh from R1 (two-way), skin 0.015 | (this commit) | 25.31 | 0.801 | 0.191 | 49,006 | 61 | — | 0 | 0 | **yes** | render→collision p50 0.028 / p90 0.070 / p99 0.11 / max 0.25 | random: caught 76.0 %, pass 3.2 %; down: caught 90.0 %; drop falls through 0.01 %; test-view agree 91.6 % |
-| garden `images_8` | Phase 7 Unity 6000.5: ours / naive / render soup as colliders | (this commit) | | | | 48,852 / 50,000 / 236,637 | | | | | yes / no / no | | Unity drops fell through 0.2 / 31.8 / 3.5 %; capsule walks reached 95.7 / 90.0 / 91.7 % |
+| garden `images_8` | Phase 7 Unity 6000.5 at measured scale (0.579 m/unit): ours / naive / render soup as colliders | (this commit) | | | | 48,852 / 50,000 / 236,637 | | | | | yes / no / no | | 5 cm sphere drops fell through 0.1 / 16.2 / 0.4 %; capsule walks reached 91.7 / 91.3 / 90.0 % |
 
 ## Baseline "before" picture (garden `images_8`, 2026-11-10)
 
