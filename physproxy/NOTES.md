@@ -386,3 +386,19 @@ These replace the 1-unit-=-1-m table above, whose CSVs are kept in `unity_result
 - So at true scale, ours vs the render soup is about collider quality more than leak rate: closed and manifold, 5× fewer faces, the same contact behavior, no leaks for small objects.
 
 Repeatability: a second Play run with the same settings (11:47) produced bit-identical drop CSVs for all three colliders. For walks, the outcomes (reached / stuck / fell) were identical in all 900 walks; only 3 stuck walks differed, in their final distance and path length, by 1–11 cm. The likely cause is small CharacterController differences between runs. The reported rates are unaffected.
+
+## Phase 7 ball-size sweep (2026-11-11, measured scale)
+
+Setup: 2,000 drops per collider and radius, with continuous collision detection and a fixed 0.01 s step. CSVs are in `unity_results/radius_sweep/`. "Through" = ended below the floor while inside the scene area; rolling off the edge is counted apart. Rest offset = median, over balls that stayed where they landed, of rest height minus the visible surface.
+
+| Collider | r = 1 cm through | r = 2 cm through | r = 5 cm through | Rest offset (1 / 2 / 5 cm) |
+|---|---|---|---|---|
+| **ours** (48,852 faces, watertight) | **0.5%** | **0.1%** | **0.0%** | +0.5 / +0.7 / +0.7 cm |
+| naive cleanup (50k) | 67.1% | 45.6% | 16.1% | −1.2 / −1.2 / −1.0 cm |
+| render triangles as-is (237k) | 23.2% | 7.0% | 0.4% | −0.4 / −0.2 / +0.1 cm |
+
+(Excludes balls that started inside the collider.)
+
+- **The render soup leaks once objects get small:** 23% of 1 cm balls and 7% of 2 cm balls fall through its gaps. 5 cm balls are too big for most gaps (0.4%). Naive cleanup leaks at every size.
+- **Ours holds at every size,** at 0.5% or less. The 10 one-centimetre fall-throughs are inside the scene and did not start inside the mesh. A watertight `MeshCollider` is still only a surface: a small, fast ball that tunnels through one contact is then inside the closed volume, and it leaves through the floor wall from inside. Possible mitigations if it matters: a smaller timestep, a larger contact offset, or a solid (convex-decomposed) collider.
+- **This is the clearest physics argument for the proxy:** the visual mesh is fine for large objects but leaks for small ones. Ours keeps rest heights within about 1 cm of what is seen, and leaks almost nothing at all three sizes.
