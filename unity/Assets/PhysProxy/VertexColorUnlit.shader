@@ -21,6 +21,11 @@ Shader "PhysProxy/VertexColorUnlit"
                 v2f o;
                 o.pos = UnityObjectToClipPos(v.vertex);
                 o.color = v.color * _Tint;
+                // Vertex colors are sRGB (as trained). In a Linear-color-space project Unity does not convert
+                // them, so the sRGB output would brighten and wash them out: convert to linear here.
+                #ifndef UNITY_COLORSPACE_GAMMA
+                o.color.rgb = GammaToLinearSpace(o.color.rgb);
+                #endif
                 return o;
             }
             fixed4 frag (v2f i) : SV_Target { return i.color; }
