@@ -12,9 +12,11 @@ Writes OUT/ (copy it to <UnityProject>/Assets/StreamingAssets/physproxy/<scene>/
 
 Frame: Unity is left-handed and Y-up. Points go to the proxy box frame (local z = up), then
 Unity (x, y, z) = s * (lx - cx, lz - floor, ly - cy), where s = --units_to_m, (cx, cy) is the box
-centre and floor is the bottom of the box. Swapping two axes changes handedness, which also turns
-the outward counter-clockwise winding of our meshes into Unity's clockwise front faces, so the
-indices are written unchanged.
+centre and floor is the bottom of the box. Each triangle's index order is reversed on export: after
+the axis swap, the cross product Unity uses for normals (RecalculateNormals, PhysX back-face
+tests) would otherwise point into our closed meshes. Found in the first Unity run (2026-11-11):
+spheres with continuous collision detection passed through the collision mesh's top surface from
+outside and came to rest on the inside of the box floor.
 
 Mesh format (.ppm, little endian): b"PPM1", int32 n_vertices, int32 n_faces, int32 has_color,
 float32[n_vertices*3] positions, uint8[n_vertices*4] RGBA if has_color, int32[n_faces*3] indices.
@@ -37,7 +39,7 @@ sys.path.insert(0, ROOT)
 
 def write_ppm(path, v, f, rgba=None):
     v = np.ascontiguousarray(v, np.float32)
-    f = np.ascontiguousarray(f, np.int32)
+    f = np.ascontiguousarray(np.asarray(f)[:, ::-1], np.int32)     # see the frame note above
     with open(path, "wb") as fh:
         fh.write(b"PPM1")
         fh.write(struct.pack("<iii", v.shape[0], f.shape[0], 1 if rgba is not None else 0))
