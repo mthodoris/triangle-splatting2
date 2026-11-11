@@ -18,7 +18,7 @@ namespace PhysProxy
         public float ballRadius = 0.08f;
         public float throwSpeed = 4f;
         [Tooltip("0 = no bounce, 1 = perfectly elastic")]
-        [Range(0f, 1f)] public float ballBounciness = 0.3f;
+        [Range(0f, 1f)] public float ballBounciness = 0.45f;
 
         [Header("Rain (R key)")]
         public int rainCount = 50;
@@ -26,6 +26,10 @@ namespace PhysProxy
         public float rainHeightAboveBox = 0.5f;
         public float rainSpread = 1.0f;
         public bool rainRandomColors = true;
+        [Tooltip("Share of rain balls with a random radius in [rainMinRadius, rainMaxRadius]; the rest use ballRadius")]
+        [Range(0f, 1f)] public float rainRandomSizeFraction = 0.5f;
+        public float rainMinRadius = 0.03f;
+        public float rainMaxRadius = 0.08f;
         Vector3 boxSize = new Vector3(6.47f, 2.6f, 5.9f);   // overwritten from meta.json
 
 #if UNITY_6000_0_OR_NEWER
@@ -128,7 +132,7 @@ namespace PhysProxy
                 if (KeyDigit(k)) Use(k);
             if (KeySpace() && Camera.main != null)
                 Spawn(Camera.main.transform.position + Camera.main.transform.forward * 0.5f,
-                      Camera.main.transform.forward * throwSpeed, Color.white);
+                      Camera.main.transform.forward * throwSpeed, Color.white, ballRadius);
             if (KeyR()) Rain();
         }
 
@@ -141,15 +145,16 @@ namespace PhysProxy
                                     boxSize.y + rainHeightAboveBox + Random.Range(0f, rainSpread),
                                     Random.Range(-0.5f, 0.5f) * boxSize.z);
                 var c = rainRandomColors ? Color.HSVToRGB(Random.value, 0.8f, 1f) : Color.white;
-                Spawn(p, Vector3.zero, c);
+                float r = Random.value < rainRandomSizeFraction ? Random.Range(rainMinRadius, rainMaxRadius) : ballRadius;
+                Spawn(p, Vector3.zero, c, r);
             }
             Debug.Log($"[physproxy] rain: {rainCount} balls over {boxSize.x:0.0} x {boxSize.z:0.0} m");
         }
 
-        void Spawn(Vector3 pos, Vector3 vel, Color color)
+        void Spawn(Vector3 pos, Vector3 vel, Color color, float radius)
         {
             var b = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            b.transform.localScale = Vector3.one * (2 * ballRadius);
+            b.transform.localScale = Vector3.one * (2 * radius);
             b.transform.position = pos;
             b.GetComponent<Renderer>().material.color = color;
             if (ballMat == null)
