@@ -17,6 +17,8 @@ namespace PhysProxy
         public int activeCollider = 0;
         public float ballRadius = 0.08f;
         public float throwSpeed = 4f;
+        [Tooltip("0 = no bounce, 1 = perfectly elastic")]
+        [Range(0f, 1f)] public float ballBounciness = 0.3f;
 
         [Header("Rain (R key)")]
         public int rainCount = 50;
@@ -25,6 +27,12 @@ namespace PhysProxy
         public float rainSpread = 1.0f;
         public bool rainRandomColors = true;
         Vector3 boxSize = new Vector3(6.47f, 2.6f, 5.9f);   // overwritten from meta.json
+
+#if UNITY_6000_0_OR_NEWER
+        PhysicsMaterial ballMat;
+#else
+        PhysicMaterial ballMat;
+#endif
 
         [System.Serializable] class Meta { public float[] box_size_unity; }
 
@@ -144,6 +152,16 @@ namespace PhysProxy
             b.transform.localScale = Vector3.one * (2 * ballRadius);
             b.transform.position = pos;
             b.GetComponent<Renderer>().material.color = color;
+            if (ballMat == null)
+            {
+#if UNITY_6000_0_OR_NEWER
+                ballMat = new PhysicsMaterial("ball") { bounceCombine = PhysicsMaterialCombine.Maximum };
+#else
+                ballMat = new PhysicMaterial("ball") { bounceCombine = PhysicMaterialCombine.Maximum };
+#endif
+            }
+            ballMat.bounciness = ballBounciness;   // Maximum: the collider's default 0 does not cancel it
+            b.GetComponent<Collider>().sharedMaterial = ballMat;
             var rb = b.AddComponent<Rigidbody>();
             rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
 #if UNITY_6000_0_OR_NEWER
