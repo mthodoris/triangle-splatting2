@@ -63,8 +63,9 @@ def main():
     lp = ModelParams(parser)
     parser.add_argument("--iteration", type=int, default=-1)
     parser.add_argument("--sdf", default=None)
-    parser.add_argument("--units_to_m", type=float, default=1.0,
-                        help="metres per scene unit (garden: cameras circle at ~3.7 units, so ~1 is plausible)")
+    parser.add_argument("--units_to_m", type=float, default=None,
+                        help="metres per scene unit; default: MODEL/metric_scale.json "
+                             "(physproxy/eval/metric_scale.py, Metric3D), else 1.0")
     parser.add_argument("--n_drops", type=int, default=2000)
     parser.add_argument("--n_walks", type=int, default=300)
     parser.add_argument("--walk_len", type=float, nargs=2, default=(1.0, 3.0), help="straight-line length range (units)")
@@ -82,6 +83,10 @@ def main():
     frame, lo, hi = sd["frame"].float(), sd["aabb_min"].float(), sd["aabb_max"].float()
     c = 0.5 * (lo + hi)
     s = args.units_to_m
+    if s is None:
+        ms = os.path.join(M, "metric_scale.json")
+        s = json.load(open(ms))["metres_per_unit"] if os.path.exists(ms) else 1.0
+        print(f"[unity] units_to_m = {s:.4f} ({'Metric3D estimate' if os.path.exists(ms) else 'default'})")
 
     def to_unity(p):                      # world [N,3] torch -> Unity [N,3] numpy
         loc = p.float() @ frame.T

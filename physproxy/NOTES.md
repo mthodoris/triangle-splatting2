@@ -357,3 +357,12 @@ Setup: the user's project is `/data/manousis/physproxy`. The run used the defaul
 - **Walking is best on ours** (95.7% reach the goal). On the triangle-based colliders, capsules get stuck more often on small steps and edges.
 - **Ours rests a bit high:** 21% of the stationary spheres rest more than 5 cm above the visible surface. That is the 0.015 skin plus grass and leaves smoothed into the volume. The median is +1.3 cm.
 - **Not yet checked:** the scale (1 unit = 1 m is assumed), and the viewer's look under URP. The viewer ran; whether it looked right is still to be confirmed with the user.
+
+## Scene scale (2026-11-11)
+
+`physproxy/eval/metric_scale.py` runs Metric3D ViT-L with its official metric recipe on 24 training views (`images_4`): canonical 616 × 1064 input, ImageNet normalisation, depth × fx/1000. It compares the result with the render mesh's z-buffer on pixels inside the proxy box. The upstream loader runs the same network without normalisation or focal scaling, which is fine for its normals but not metric.
+
+- Garden: **0.579 m per scene unit**. Per-view medians range 0.53–0.64 (p10–p90), and each view's interquartile range is about ±2%.
+- Check: the table is 1.35 units tall and about 3.1 across, which is 0.78 m and 1.8 m.
+
+`export_for_unity.py` now takes its scale from `MODEL/metric_scale.json`. The garden box in Unity is 6.5 × 2.6 × 5.9 m. The first Unity results (Phase 7 above) used 1 unit = 1 m, so they are re-run at the measured scale.

@@ -8,7 +8,7 @@ They were written without access to a Unity install. They use only stable APIs: 
 
 ```bash
 python unity/export_for_unity.py -s /data/manousis/360_v2/garden -i images_8 \
-    -m output/physproxy/p4b_R0_oneway --units_to_m 1.0
+    -m output/physproxy/p4b_R0_oneway
 ```
 
 This writes `MODEL/unity/`, about 20 MB:
@@ -23,7 +23,7 @@ This writes `MODEL/unity/`, about 20 MB:
 | `walks.csv` | start and goal points on the ground |
 | `meta.json` | frame, scale, provenance |
 
-**Frame.** Unity is Y-up and left-handed. y = 0 is the bottom of the proxy box, and x/z are centred on the box. `--units_to_m` converts scene units to metres; gravity is 9.81 m/s², so the scale matters. The garden cameras circle at about 3.7 units, so 1 unit ≈ 1 m is plausible but not measured.
+**Frame.** Unity is Y-up and left-handed. y = 0 is the bottom of the proxy box, and x/z are centred on the box. `--units_to_m` converts scene units to metres; gravity is 9.81 m/s², so the scale matters. By default it comes from `physproxy/eval/metric_scale.py`, which compares Metric3D metric depth with the render mesh. On garden that gives 0.579 m per unit (24 views, p10–p90 0.53–0.64), and the table then measures 0.78 m tall and 1.8 m across.
 
 ## 2. Unity project
 
