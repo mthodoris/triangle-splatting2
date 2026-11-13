@@ -4,6 +4,6 @@
 [submodule "submodules/eigen"]
 	path = submodules/eigen
 	url = https://gitlab.com/libeigen/eigen.git
-[submodule "submodules/diff-triangle2-rasterization"]
-	path = submodules/diff-triangle2-rasterization
-	url = https://github.com/trianglesplatting2/diff-triangle2-rasterization
+[submodule "submodules/diff-triangle2-rasterization/third_party/glm"]
+	path = submodules/diff-triangle2-rasterization/third_party/glm
+	url = https://github.com/g-truc/glm.git
