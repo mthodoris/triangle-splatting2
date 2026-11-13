@@ -63,6 +63,9 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        # textured triangles: per-triangle RGB residual texture of size texture_res x texture_res
+        # (0 = no texture at all, i.e. exactly plain TS+). See notes/plan.md.
+        self.texture_res = 8
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -94,6 +97,12 @@ class OptimizationParams(ParamGroup):
         
         self.feature_lr = 0.0016 # 0.0025
         self.max_points = 3000000
+
+        # textured triangles (notes/plan.md): own Adam learning rate for the per-triangle texture
+        # (BBSplat's colour-texture lr), and what a triangle's 4 children get when it is split
+        # ("zero" = v1 rule; "copy"/"resample" are planned experiment options).
+        self.texture_lr = 0.0025
+        self.split_texture = "zero"
 
         # Opacity & weight
         self.set_weight = 0.28

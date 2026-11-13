@@ -33,6 +33,23 @@ import triangulation
 
 
 
+def child_textures(parent_textures, mode="zero"):
+    """Textures for the 4 children of each split triangle.
+
+    parent_textures: [P, 3, S, S], one per parent, in the order the parents are split.
+    Returns [4P, 3, S, S]: 4 consecutive rows per parent, matching _update_params_fast,
+    which appends 4 consecutive children per parent.
+
+    mode "zero" (v1, notes/plan.md): children start with no texture; the parent's texture is
+    dropped. "copy" / "resample" (children inherit the parent's texture) are planned experiment
+    options (step 8.4) and are not implemented yet.
+    """
+    if mode == "zero":
+        P, C, S, _ = parent_textures.shape
+        return torch.zeros((4 * P, C, S, S), dtype=parent_textures.dtype, device=parent_textures.device)
+    raise NotImplementedError(f"--split_texture {mode} is not implemented yet (only 'zero')")
+
+
 class TriangleModel:
 
     def setup_functions(self):
@@ -51,9 +68,16 @@ class TriangleModel:
         self.exponential_activation = lambda x:math.exp(x)
         self.inverse_exponential_activation = lambda y: math.log(y)
 
-    def __init__(self, sh_degree : int):
+    def __init__(self, sh_degree : int, texture_res : int = 0):
 
         self._triangles = torch.empty(0) # can be deleted eventually
+
+        # Textured triangles: one RGB residual texture [3, S, S] per triangle, S = texture_res
+        # (0 = no texture, plain TS+). Row i of _texture always belongs to triangle i of
+        # _triangle_indices; every method that changes the triangle list keeps it in sync.
+        self.texture_res = int(texture_res)
+        self._texture = torch.empty(0)
+        self.split_texture = "zero"
 
         self.size_probs_zero = 0.0
         self.size_probs_zero_image_space = 0.0
@@ -90,6 +114,9 @@ class TriangleModel:
         point_cloud_state_dict["features_rest"] = self._features_rest
         point_cloud_state_dict["importance_score"] = self.importance_score
         point_cloud_state_dict["image_size"] = self.image_size
+        if self.texture_res > 0:
+            point_cloud_state_dict["texture"] = self._texture
+            point_cloud_state_dict["texture_res"] = self.texture_res
 
         torch.save(point_cloud_state_dict, os.path.join(path, 'point_cloud_state_dict.pt'))
 
@@ -108,6 +135,12 @@ class TriangleModel:
         self._features_dc        = state["features_dc"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
         self._features_rest      = state["features_rest"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
         self.importance_score = state["importance_score"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
+        if "texture" in state:   # textured model (older/plain TS+ checkpoints have no texture)
+            self._texture = state["texture"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
+            self.texture_res = int(state["texture_res"])
+        else:
+            self._texture = torch.empty(0)
+            self.texture_res = 0
 
 
         # For object extraction
@@ -129,6 +162,8 @@ class TriangleModel:
 
             with torch.no_grad():
                 self._triangle_indices = self._triangle_indices[keep_mask]
+                if self.texture_res > 0:
+                    self._texture = self._texture[keep_mask].detach().clone().requires_grad_(True)
 
         ################################################################
 
@@ -146,7 +181,10 @@ class TriangleModel:
             {'params': [self.vertices], 'lr': 0.0, "name": "vertices"},
             {'params': [self.vertex_weight], 'lr': 0.0, "name": "vertex_weight"}
         ]
+        if self.texture_res > 0:
+            param_groups.append({'params': [self._texture], 'lr': 0.0, "name": "texture"})
         self.optimizer = torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+        self._check_texture_sync()
 
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
@@ -215,6 +253,53 @@ class TriangleModel:
     def get_vertex_weight(self):
         return self.opacity_activation(self.vertex_weight)
 
+    # ------------------------------------------------------------------------------------------
+    # Per-triangle texture helpers
+    # ------------------------------------------------------------------------------------------
+    @property
+    def has_texture(self):
+        return self.texture_res > 0 and self._texture.numel() > 0
+
+    @property
+    def get_texture(self):
+        return self._texture
+
+    def _texture_group(self):
+        if self.optimizer is None:
+            return None
+        for group in self.optimizer.param_groups:
+            if group["name"] == "texture":
+                return group
+        return None
+
+    def _update_texture(self, rows, state_rows):
+        """Replace the texture by rows(texture) and its Adam moments by state_rows(moment).
+        Used to prune (index with a mask) and to append the textures of new triangles."""
+        new = nn.Parameter(rows(self._texture.detach()).contiguous().requires_grad_(True))
+        group = self._texture_group()
+        if group is not None:
+            state = self.optimizer.state.pop(group["params"][0], None)
+            if state is not None:
+                state["exp_avg"] = state_rows(state["exp_avg"])
+                state["exp_avg_sq"] = state_rows(state["exp_avg_sq"])
+                self.optimizer.state[new] = state
+            group["params"][0] = new
+        self._texture = new
+
+    def _prune_texture(self, mask):
+        if self.texture_res > 0:
+            self._update_texture(lambda t: t[mask], lambda s: s[mask])
+
+    def _append_texture(self, new_textures):
+        if self.texture_res > 0:
+            self._update_texture(lambda t: torch.cat([t, new_textures], dim=0),
+                                 lambda s: torch.cat([s, torch.zeros_like(new_textures)], dim=0))
+
+    def _check_texture_sync(self):
+        if self.texture_res > 0:
+            assert self._texture.shape[0] == self._triangle_indices.shape[0], \
+                f"texture/triangle count mismatch: {self._texture.shape[0]} textures, {self._triangle_indices.shape[0]} triangles"
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -274,7 +359,14 @@ class TriangleModel:
 
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
-        
+
+        # residual textures start at exactly 0, so the textured model starts as plain TS+
+        if self.texture_res > 0:
+            S = self.texture_res
+            self._texture = nn.Parameter(torch.zeros((self._triangle_indices.shape[0], 3, S, S),
+                                                     dtype=torch.float, device="cuda").requires_grad_(True))
+        self._check_texture_sync()
+
 
     def training_setup(self, training_args, lr_mask, lr_features, weight_lr, lr_sigma, lr_triangles_init):
 
@@ -303,6 +395,12 @@ class TriangleModel:
             {'params': [self.vertices], 'lr': lr_triangles_init, "name": "vertices"},
             {'params': [self.vertex_weight], 'lr': weight_lr, "name": "vertex_weight"}
         ]
+        if self.texture_res > 0:
+            # own learning rate; a texture without gradient (not rendered yet) is skipped by Adam
+            l.append({'params': [self._texture], 'lr': training_args.texture_lr, "name": "texture"})
+        self.split_texture = getattr(training_args, "split_texture", "zero")
+        if self.texture_res > 0 and self.split_texture != "zero":
+            raise NotImplementedError(f"--split_texture {self.split_texture}: only 'zero' is implemented so far")
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
@@ -347,6 +445,8 @@ class TriangleModel:
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             assert len(group["params"]) == 1
+            if group["name"] == "texture":
+                continue  # per-triangle, appended separately (_append_texture)
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -367,7 +467,7 @@ class TriangleModel:
         return optimizable_tensors
     
 
-    def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles):
+    def densification_postfix(self, new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_textures=None):
         # Create dictionary of new tensors to append
         d = {
             "vertices": new_vertices,
@@ -387,9 +487,13 @@ class TriangleModel:
         
         # Update triangle indices
         self._triangle_indices = torch.cat([
-            self._triangle_indices, 
+            self._triangle_indices,
             new_triangles
         ], dim=0)
+        if self.texture_res > 0:
+            assert new_textures is not None and new_textures.shape[0] == new_triangles.shape[0]
+            self._append_texture(new_textures)
+        self._check_texture_sync()
 
         self.image_size = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
         self.importance_score = torch.zeros((self._triangle_indices.shape[0]), dtype=torch.float, device="cuda")
@@ -518,6 +622,8 @@ class TriangleModel:
             valid_tris = (remapped >= 0).all(dim=1)
             remapped = remapped[valid_tris]
             self._triangle_indices = remapped.to(torch.int32).contiguous()
+            self._prune_texture(valid_tris)   # triangles that lost a vertex are dropped: drop their textures too
+            self._check_texture_sync()
 
             if isinstance(self.image_size, torch.Tensor) and self.image_size.numel() > 0:
                 self.image_size = self.image_size[valid_tris]
@@ -565,6 +671,8 @@ class TriangleModel:
         # WE SET THE CLASS VARIABLES TO THEIR NEW VALUES#
         #################################################
         self._triangle_indices = self._triangle_indices.to(torch.int32)
+        self._prune_texture(mask)
+        self._check_texture_sync()
 
         self.image_size = self.image_size[mask]
         self.importance_score = self.importance_score[mask]
@@ -607,7 +715,14 @@ class TriangleModel:
 
         (new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles) = self._update_params_fast(add_idx, iteration)
 
-        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles)
+        # Children textures: _update_params_fast makes 4 consecutive children per parent, with the
+        # parents in torch.unique (sorted) order, so take the parents in that same order.
+        new_textures = None
+        if self.texture_res > 0:
+            parents = torch.unique(add_idx)
+            new_textures = child_textures(self._texture.detach()[parents], self.split_texture)
+
+        self.densification_postfix(new_vertices, new_vertex_weight, new_features_dc, new_features_rest, new_triangles, new_textures)
 
         mask = torch.ones(self._triangle_indices.shape[0], dtype=torch.bool)
         mask[add_idx] = False

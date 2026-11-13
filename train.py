@@ -53,7 +53,7 @@ def training(
     tb_writer = prepare_output_and_logger(dataset)
 
     # Load parameters, triangles and scene
-    triangles = TriangleModel(dataset.sh_degree)
+    triangles = TriangleModel(dataset.sh_degree, dataset.texture_res)
     scene = Scene(dataset, triangles, opt.set_weight, opt.set_sigma)
     triangles.training_setup(opt, opt.feature_lr, opt.weight_lr, opt.lr_triangles_points_init)
     triangles.add_percentage = opt.add_percentage
