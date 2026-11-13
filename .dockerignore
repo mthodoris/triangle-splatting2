@@ -1,0 +1,3 @@
+# The image clones the code from git at a fixed commit (see Dockerfile), so nothing
+# from the local folder is sent to docker build (keeps .venv, build/, outputs out).
+*
