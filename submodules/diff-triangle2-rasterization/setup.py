@@ -24,11 +24,11 @@ import os
 os.path.dirname(os.path.abspath(__file__))
 
 setup(
-    name="diff_triangle_rasterization",
-    packages=['diff_triangle_rasterization'],
+    name="diff_textured_triangle_rasterization",
+    packages=['diff_textured_triangle_rasterization'],
     ext_modules=[
         CUDAExtension(
-            name="diff_triangle_rasterization._C",
+            name="diff_textured_triangle_rasterization._C",
             sources=[
             "cuda_rasterizer/rasterizer_impl.cu",
             "cuda_rasterizer/forward.cu",

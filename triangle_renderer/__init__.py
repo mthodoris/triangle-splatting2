@@ -20,7 +20,7 @@
 
 import torch
 import math
-from diff_triangle_rasterization import TriangleRasterizationSettings, TriangleRasterizer
+from diff_textured_triangle_rasterization import TriangleRasterizationSettings, TriangleRasterizer
 from scene.triangle_model import TriangleModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
