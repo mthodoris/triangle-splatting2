@@ -87,9 +87,15 @@ RUN python -c "import torch; torch.hub.load('yvanyin/metric3d', 'metric3d_vit_la
     && python -c "from lpipsPyTorch import lpips; import torch; x=torch.rand(1,3,64,64); print(lpips(x,x,net_type='vgg'))" \
     && python -c "import torchvision; torchvision.models.vgg16(weights='IMAGENET1K_V1')"
 
-# --- checks ---
-RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, torch.cuda.get_arch_list())" \
-    && python -c "import diff_textured_triangle_rasterization, simple_knn._C, pytorch3d, mmcv.ops, triangulation; print('imports ok')" \
-    && (env | grep -E '^(NVIDIA_VISIBLE_DEVICES|CUDA_VISIBLE_DEVICES)=' && echo 'GPU env var baked in!' && exit 1 || true)
+# --- checks (no GPU/driver during docker build, so nothing here may need libcuda.so.1) ---
+# torch.cuda.get_arch_list() returns [] without a driver; read the compiled arch flags directly.
+# triangulation links the driver library libcuda.so.1, which the NVIDIA runtime provides only when a
+# job runs. Check that it is the only missing library instead of importing it here.
+RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'archs', torch._C._cuda_getArchFlags())" \
+    && python -c "import diff_textured_triangle_rasterization, simple_knn._C, pytorch3d, mmcv.ops; print('imports ok')" \
+    && MISSING=$(ldd /app/combined/triangulation/torch_bindings*.so | grep 'not found' | grep -v 'libcuda.so.1' || true) \
+    && if [ -n "$MISSING" ]; then echo "triangulation: missing libraries: $MISSING"; exit 1; fi \
+    && echo "triangulation ok (libcuda.so.1 comes from the NVIDIA runtime at job time)" \
+    && if env | grep -E '^(NVIDIA_VISIBLE_DEVICES|CUDA_VISIBLE_DEVICES)='; then echo 'GPU env var baked in!'; exit 1; fi
 
 CMD ["/bin/bash"]
