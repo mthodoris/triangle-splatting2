@@ -265,6 +265,9 @@ def training(
 
                     triangle_vertex_weights = triangles.get_vertex_weight[triangles._triangle_indices]
 
+                # counts.csv (step 8): model size after this prune/densify step + GPU memory
+                log_counts(scene.model_path, iteration, triangles)
+
 
 
             if iteration < opt.iterations:
@@ -284,9 +287,23 @@ def training(
         triangles.importance_score[mask] = importance_score[mask]
     mask_importance  = (triangles.importance_score <= 0.5).squeeze() 
     triangles.prune_triangles(~mask_importance) # delete all the remaining triangles that do not have an influence
+    log_counts(scene.model_path, "final", triangles)
 
     scene.save(iteration)          
     print("Training is done")
+
+def log_counts(model_path, iteration, triangles):
+    """Append one row to <model>/counts.csv: vertices, triangles, texture memory and GPU memory
+    (allocated now / peak since the previous row). Logging only; does not change training."""
+    path = os.path.join(model_path, "counts.csv")
+    new = not os.path.exists(path)
+    tex_mb = triangles._texture.numel() * 4 / 2**20 if triangles.has_texture else 0.0
+    with open(path, "a") as f:
+        if new:
+            f.write("iteration,vertices,triangles,texture_MB,gpu_alloc_MB,gpu_peak_MB\n")
+        f.write(f"{iteration},{triangles.vertices.shape[0]},{triangles._triangle_indices.shape[0]},{tex_mb:.1f},"
+                f"{torch.cuda.memory_allocated() / 2**20:.0f},{torch.cuda.max_memory_allocated() / 2**20:.0f}\n")
+    torch.cuda.reset_peak_memory_stats()
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
