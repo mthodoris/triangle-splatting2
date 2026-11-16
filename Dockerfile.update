@@ -1,0 +1,35 @@
+# =============================================================================
+# Fast image update: start from an existing textured-triangles image and move the code to a
+# newer COMMIT. Only our rasterizer is recompiled (minutes instead of the 1-2 h full build).
+# Use it when only our code changed (not requirements / Dockerfile). Commands: notes/cluster.md.
+#
+#   docker build -f Dockerfile.update --build-arg BASE=<old image> --build-arg COMMIT=<sha> -t <new image> .
+# =============================================================================
+ARG BASE=195.251.117.42:31000/textured-triangles:3ef9c33
+FROM ${BASE}
+
+ARG COMMIT
+ARG CUDA_ARCHS="8.6;8.9;12.0+PTX"
+
+RUN test -n "${COMMIT}" || (echo "build with --build-arg COMMIT=<git sha>" && exit 1)
+# requirements / compiled dependencies must not have changed since the base image (otherwise do a full
+# build). (Dockerfile itself is not compared: 3ef9c33 -> 87cc8eb only changed its final check step, and
+# the 3ef9c33 image was already built with that version, notes/cluster.md.)
+RUN cd /app/combined && OLD=$(cat /app/IMAGE_COMMIT) \
+    && git fetch -q origin \
+    && if ! git diff --quiet ${OLD} ${COMMIT} -- requirements-venv.txt submodules/simple-knn CMakeLists.txt; then \
+         echo "requirements / simple-knn / CMakeLists changed since ${OLD}: do a full build"; exit 1; fi \
+    && git checkout -q --detach ${COMMIT} \
+    && git submodule update -q --init --recursive \
+    && git rev-parse HEAD > /app/IMAGE_COMMIT \
+    && echo "code: ${OLD} -> $(cat /app/IMAGE_COMMIT)"
+
+RUN cd /app/combined && TORCH_CUDA_ARCH_LIST="${CUDA_ARCHS}" pip install --no-cache-dir --no-build-isolation \
+        ./submodules/diff-triangle2-rasterization
+
+# checks: the new rasterizer has the step-5/6 API (texture gradient, perspective_uv)
+RUN python -c "import diff_textured_triangle_rasterization as r, torch; \
+s = r.TriangleRasterizationSettings._field_defaults; \
+assert 'perspective_uv' in s and 'atomic_vertex_grads' in s, s; \
+print('rasterizer ok, settings defaults:', s, 'archs', torch._C._cuda_getArchFlags())" \
+    && if env | grep -E '^(NVIDIA_VISIBLE_DEVICES|CUDA_VISIBLE_DEVICES)='; then echo 'GPU env var baked in!'; exit 1; fi
