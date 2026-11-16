@@ -118,12 +118,6 @@ class _RasterizeTriangles(torch.autograd.Function):
         sigma = ctx.sigma
         vertices, triangles_indices, vertex_weights, colors_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
 
-        # Step 4: the backward pass does not know about the texture yet (step 5). With a zero texture
-        # the forward is exactly plain TS+, so the gradients are right. With a non-zero texture they
-        # would silently be wrong, so stop instead.
-        if ctx.texture.numel() != 0 and bool(ctx.texture.detach().any()):
-            raise NotImplementedError("backward with a non-zero texture is not implemented yet (step 5 of notes/plan.md)")
-
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
                 vertices,
@@ -145,6 +139,7 @@ class _RasterizeTriangles(torch.autograd.Function):
                 num_rendered,
                 binningBuffer,
                 imgBuffer,
+                ctx.texture,
                 raster_settings.atomic_vertex_grads,
                 raster_settings.debug)
 
@@ -152,13 +147,13 @@ class _RasterizeTriangles(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                grad_vertices, grad_vertice_weights, grad_sigma, grad_colors_precomp, grad_sh = _C.rasterize_triangles_backward(*args)
+                grad_vertices, grad_vertice_weights, grad_colors_precomp, grad_sh, grad_texture = _C.rasterize_triangles_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
                 raise ex
         else:
-             grad_vertices, grad_vertice_weights, grad_colors_precomp, grad_sh = _C.rasterize_triangles_backward(*args)
+            grad_vertices, grad_vertice_weights, grad_colors_precomp, grad_sh, grad_texture = _C.rasterize_triangles_backward(*args)
 
 
         grads = (
@@ -170,7 +165,7 @@ class _RasterizeTriangles(torch.autograd.Function):
             grad_colors_precomp,
             None,
             None,
-            None,  # texture: no gradient yet (step 5)
+            grad_texture if ctx.texture.numel() != 0 else None,  # texture (step 5)
         )
 
         return grads

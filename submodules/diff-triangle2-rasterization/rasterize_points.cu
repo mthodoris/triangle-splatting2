@@ -153,7 +153,7 @@ RasterizetrianglesCUDA(
   return std::make_tuple(rendered, out_color, out_others, radii, geomBuffer, binningBuffer, imgBuffer, scaling, max_blending);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizetrianglesBackwardCUDA(
  	const torch::Tensor& background,
 	const torch::Tensor& vertices,
@@ -175,6 +175,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
+	const torch::Tensor& texture,
 	const bool atomic_vertex_grads,
 	const bool debug) 
 {
@@ -204,7 +205,24 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 
   torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, vertices.options());
   torch::Tensor dL_dnormal3D = torch::zeros({P, 3}, vertices.options());
-  
+
+  // Textured triangles (step 5): same texture as in the forward (shape checked there), or empty.
+  const float* texture_ptr = nullptr;
+  int texture_res = 0;
+  torch::Tensor texture_c;
+  torch::Tensor dL_dtexture = torch::zeros({0}, vertices.options());
+  if (texture.numel() != 0)
+  {
+	TORCH_CHECK(texture.dim() == 4 && texture.size(0) == P && texture.size(1) == NUM_CHANNELS
+	            && texture.size(2) == texture.size(3) && texture.size(2) >= 2,
+	            "texture must have shape [num_triangles, ", NUM_CHANNELS, ", S, S] with S >= 2, got ", texture.sizes());
+	TORCH_CHECK(texture.scalar_type() == torch::kFloat32 && texture.is_cuda(), "texture must be a float32 CUDA tensor");
+	texture_c = texture.contiguous();
+	texture_ptr = texture_c.data_ptr<float>();
+	texture_res = texture.size(2);
+	dL_dtexture = torch::zeros_like(texture_c);
+  }
+
   if(P != 0)
   {  
 	  CudaRasterizer::Rasterizer::backward(P, V, degree, M, R,
@@ -238,11 +256,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 	  dL_dcolors.contiguous().data_ptr<float>(),
 	  dL_dsh.contiguous().data_ptr<float>(),
 	  dL_dpoints2D.contiguous().data_ptr<float>(),
+	  texture_ptr,
+	  texture_res,
+	  texture_ptr != nullptr ? dL_dtexture.data_ptr<float>() : nullptr,
 	  atomic_vertex_grads,
 	  debug);
   }
 
-  return std::make_tuple(dL_dvertices3D, dL_dvertice_weight, dL_dcolors, dL_dsh);
+  return std::make_tuple(dL_dvertices3D, dL_dvertice_weight, dL_dcolors, dL_dsh, dL_dtexture);
 }
 
 torch::Tensor markVisible(

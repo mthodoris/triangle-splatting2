@@ -22,6 +22,7 @@
 
  #include "backward.h"
  #include "auxiliary.h"
+ #include "texture_sampler.h"
  #include <cooperative_groups.h>
  #include <cooperative_groups/reduce.h>
  namespace cg = cooperative_groups;
@@ -575,7 +576,10 @@
 	 float* __restrict__ dL_dopacity,
 	 float* __restrict__ dL_dnormal3D,
 	 float* __restrict__ dL_dcolors,
-	 float* __restrict__ dL_dpoints2D)
+	 float* __restrict__ dL_dpoints2D,
+	 const float* __restrict__ texture,       // [P, C, S, S] or nullptr (no texture)
+	 const int texture_res,                   // S
+	 float* __restrict__ dL_dtexture)         // [P, C, S, S] (unused if texture == nullptr)
  {
 	 // We rasterize again. Compute necessary block info.
 	 auto block = cg::this_thread_block();
@@ -596,7 +600,8 @@
  
 	 __shared__ int collected_id[BLOCK_SIZE];
 	 __shared__ float4 collected_conic_opacity[BLOCK_SIZE];
-	 __shared__ float collected_colors[C * BLOCK_SIZE];
+	 // (TS+ also filled a shared collected_colors[] here with colors[triangle_id * C + i]; it was never
+	 //  read, and 'colors' is per vertex, so it could read out of bounds. Removed, see notes/decisions.md.)
  
 	 /*
 	 ADDED FOR Triangle PURPOSES ==========================================================================
@@ -674,8 +679,6 @@
 			 const int coll_id = point_list[range.y - progress - 1];
 			 collected_id[block.thread_rank()] = coll_id;
 			 collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
-			 for (int i = 0; i < C; i++)
-				 collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
 			 collected_depths[block.thread_rank()] = depths[coll_id];
 			 collected_xy[block.thread_rank()] = means2D[coll_id];
 			 for (int k = 0; k < 3; k++) {
@@ -779,6 +782,24 @@
 				sum0 += dL_dcolor_ch * c0; // for db2
 				sum1 += dL_dcolor_ch * c1; // for db0
 				sum2 += dL_dcolor_ch * c2; // for db1
+			 }
+
+			 // Textured triangles (step 5): the forward added this triangle's texture sample to the
+			 // colour. Add the SAME sample here, because interp_color feeds dL_dalpha (via
+			 // last_color / accum_rec) below. Then scatter dL/dsample = alpha * T * dL_dpixel into the
+			 // 4 texels of the bilinear cell. dL/d(u,v) is not propagated to the vertices (decision 2).
+			 if (texture != nullptr) {
+				 const float2 tuv = triangle_uv(b0, b1);
+				 const size_t toff = (size_t)j_id * C * texture_res * texture_res;
+				 float tex_rgb[C];
+				 sample_texture_bilinear(tex_rgb, tuv.x, tuv.y, texture + toff, texture_res, C);
+				 float dL_dtex_rgb[C];
+				 for (int ch = 0; ch < C; ++ch) {
+					 interp_color[ch] += tex_rgb[ch];
+					 dL_dtex_rgb[ch] = dchannel_dcolor * dL_dpixel[ch];
+				 }
+				 backward_sample_texture_bilinear(dL_dtex_rgb, tuv.x, tuv.y,
+					 texture + toff, dL_dtexture + toff, texture_res, C);
 			 }
 
 			 float dL_dalpha = 0.0f;
@@ -1060,7 +1081,10 @@
 	 float* dL_dopacity,
 	 float* dL_dnormal3D,
 	 float* dL_dcolors,
-	 float* dL_dpoints2D
+	 float* dL_dpoints2D,
+	 const float* texture,
+	 const int texture_res,
+	 float* dL_dtexture
 	)
  {
 	 renderCUDA<NUM_CHANNELS> << <grid, block >> >(
@@ -1088,6 +1112,9 @@
 		 dL_dopacity,
 		 dL_dnormal3D,
 		 dL_dcolors,
-		 dL_dpoints2D
+		 dL_dpoints2D,
+		 texture,
+		 texture_res,
+		 dL_dtexture
 		 );
  }

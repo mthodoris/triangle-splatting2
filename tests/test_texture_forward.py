@@ -7,8 +7,8 @@ Checks on the local fixture (plain TS+ garden images_8 model):
   3. UV mapping: on a copy of the model where every triangle has its own 3 vertices, a texture that
      is linear in (u, v) must give the same image as adding the corner values to the vertex colours
      (checks texture orientation, v0/v1/v2 -> (0,0)/(1,0)/(0,1), and that triangle i reads texture i);
-  4. a wrong texture shape is rejected; backward still works with a zero texture (texture gets no
-     gradient yet) and refuses a non-zero texture (gradients would be wrong until step 5);
+  4. a wrong texture shape is rejected; backward runs and gives the texture a gradient (values: step 5,
+     tests/test_texture_backward.py);
   5. writes a checkerboard picture for a visual check.
 
 Usage (from combined/, venv active):
@@ -154,18 +154,12 @@ def main():
         except RuntimeError:
             check(f"rejects texture with {why}", True)
 
-    tex0 = torch.zeros(T, 3, S, S, device=dev, requires_grad=True)
-    out = render(ours, m, cam, args.scaling, texture=tex0, grad=True)
-    out["image"].sum().backward()
-    check("backward runs with a zero texture; vertices get a gradient, texture none (step 5)",
-          out["vertices"].grad is not None and tex0.grad is None)
+    # (step 5: the texture now gets gradients; their values are tested in test_texture_backward.py)
     tex1 = torch.full((T, 3, S, S), 0.1, device=dev, requires_grad=True)
     out = render(ours, m, cam, args.scaling, texture=tex1, grad=True)
-    try:
-        out["image"].sum().backward()
-        check("backward refuses a non-zero texture", False)
-    except NotImplementedError:
-        check("backward refuses a non-zero texture", True)
+    out["image"].sum().backward()
+    check("backward with a non-zero texture: vertices and texture get a gradient of the right shape",
+          out["vertices"].grad is not None and tex1.grad is not None and tex1.grad.shape == tex1.shape)
 
     # 5. checkerboard picture (on 30% of the triangles, others no texture)
     if args.out:

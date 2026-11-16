@@ -98,6 +98,9 @@ namespace CudaRasterizer
 			float* dL_dcolor,
 			float* dL_dsh,
 			float* dL_dpoints2D,
+			const float* texture,      // [P, NUM_CHANNELS, S, S] or nullptr (no texture)
+			const int texture_res,     // S
+			float* dL_dtexture,        // [P, NUM_CHANNELS, S, S]
 			const bool atomic_vertex_grads,   // true: race-free vertex gradients (see backward.cu)
 			bool debug);
 	};

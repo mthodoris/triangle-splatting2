@@ -57,7 +57,10 @@
 		 float* dL_dopacity,
 		 float* dL_dnormal3D,
 		 float* dL_dcolors,
-		 float* dL_dpoints2D);
+		 float* dL_dpoints2D,
+		 const float* texture,      // [P, NUM_CHANNELS, S, S] or nullptr (no texture)
+		 const int texture_res,     // S
+		 float* dL_dtexture);       // [P, NUM_CHANNELS, S, S]
 
 	 void computeVertexColorGradients(
         int V, int D, int M,

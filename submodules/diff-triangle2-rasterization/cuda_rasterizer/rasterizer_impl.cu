@@ -423,6 +423,9 @@
 	 float* dL_dcolor,
 	 float* dL_dsh,
 	 float* dL_dpoints2D,
+	 const float* texture,
+	 const int texture_res,
+	 float* dL_dtexture,
 	 const bool atomic_vertex_grads,
 	 bool debug)
  {
@@ -472,7 +475,10 @@
 		 dL_dopacity,
 		 dL_dnormal3D,
 		 dL_dcolor,
-		 dL_dpoints2D), debug)
+		 dL_dpoints2D,
+		 texture,
+		 texture_res,
+		 dL_dtexture), debug)
  
 
 	if (colors_precomp == nullptr) {
