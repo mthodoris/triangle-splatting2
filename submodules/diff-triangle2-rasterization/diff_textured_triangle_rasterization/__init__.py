@@ -36,6 +36,7 @@ def rasterize_triangles(
     colors_precomp,
     scaling,
     raster_settings,
+    texture,
 ):
     return _RasterizeTriangles.apply(
         vertices,
@@ -46,6 +47,7 @@ def rasterize_triangles(
         colors_precomp,
         scaling,
         raster_settings,
+        texture,
     )
 
 class _RasterizeTriangles(torch.autograd.Function):
@@ -60,6 +62,7 @@ class _RasterizeTriangles(torch.autograd.Function):
         colors_precomp,
         scaling,
         raster_settings,
+        texture,
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -81,6 +84,7 @@ class _RasterizeTriangles(torch.autograd.Function):
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
+            texture,
             raster_settings.debug
         )
 
@@ -101,6 +105,7 @@ class _RasterizeTriangles(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.sigma = sigma
+        ctx.texture = texture
         ctx.save_for_backward(vertices, triangles_indices, vertex_weights, colors_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
         return color, radii, scaling, depth, max_blending
 
@@ -112,6 +117,12 @@ class _RasterizeTriangles(torch.autograd.Function):
         raster_settings = ctx.raster_settings
         sigma = ctx.sigma
         vertices, triangles_indices, vertex_weights, colors_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+
+        # Step 4: the backward pass does not know about the texture yet (step 5). With a zero texture
+        # the forward is exactly plain TS+, so the gradients are right. With a non-zero texture they
+        # would silently be wrong, so stop instead.
+        if ctx.texture.numel() != 0 and bool(ctx.texture.detach().any()):
+            raise NotImplementedError("backward with a non-zero texture is not implemented yet (step 5 of notes/plan.md)")
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
@@ -157,7 +168,8 @@ class _RasterizeTriangles(torch.autograd.Function):
             grad_sh,
             grad_colors_precomp,
             None,
-            None
+            None,
+            None,  # texture: no gradient yet (step 5)
         )
 
         return grads
@@ -192,7 +204,10 @@ class TriangleRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, vertices, triangles_indices, vertex_weights, sigma, scaling,  shs = None, colors_precomp = None):
+    def forward(self, vertices, triangles_indices, vertex_weights, sigma, scaling,  shs = None, colors_precomp = None,
+                texture = None):
+        """texture: optional per-triangle RGB residual texture [num_triangles, 3, S, S] (float32, CUDA),
+        added to the interpolated vertex colour. None = plain TS+."""
         
         raster_settings = self.raster_settings
 
@@ -203,6 +218,8 @@ class TriangleRasterizer(nn.Module):
             shs = torch.Tensor([])
         if colors_precomp is None:
             colors_precomp = torch.Tensor([])
+        if texture is None:
+            texture = torch.Tensor([])
 
 
         # Invoke C++/CUDA rasterization routine
@@ -214,5 +231,6 @@ class TriangleRasterizer(nn.Module):
             shs,
             colors_precomp,
             scaling,
-            raster_settings, 
+            raster_settings,
+            texture,
         )

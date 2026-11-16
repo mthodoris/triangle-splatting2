@@ -97,7 +97,9 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         sigma=sigma,
         shs = shs,
         colors_precomp = colors_precomp,
-        scaling = scaling
+        scaling = scaling,
+        # textured triangles: per-triangle RGB residual texture (None = plain TS+)
+        texture = pc.get_texture if pc.has_texture else None,
        )
        
     img_hr = rendered_image.unsqueeze(0)  # -> [1, 3, H, W]

@@ -236,6 +236,8 @@
 	 float* out_color,
 	 float* out_others,
 	 float* max_blending,
+	 const float* texture,
+	 const int texture_res,
 	 int* radii,
 	 bool debug)
  {
@@ -381,7 +383,9 @@
 		 background,
 		 out_color,
 		 out_others,
-		 max_blending), debug)
+		 max_blending,
+		 texture,
+		 texture_res), debug)
  
 	 return num_rendered;
  }

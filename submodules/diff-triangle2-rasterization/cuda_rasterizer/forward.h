@@ -92,7 +92,9 @@
 		 const float* bg_color,
 		 float* out_color,
 		 float* out_others, 
-		 float* max_blending);
+		 float* max_blending,
+		 const float* texture,      // [P, NUM_CHANNELS, S, S] or nullptr (no texture)
+		 const int texture_res);    // S
  }
  
  

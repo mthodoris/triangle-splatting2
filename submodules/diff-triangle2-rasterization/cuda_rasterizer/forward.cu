@@ -22,6 +22,7 @@
 
  #include "forward.h"
  #include "auxiliary.h"
+ #include "texture_sampler.h"
  #include <cooperative_groups.h>
  #include <cooperative_groups/reduce.h>
  namespace cg = cooperative_groups;
@@ -475,7 +476,9 @@
 	 const float* __restrict__ bg_color,
 	 float* __restrict__ out_color,
 	 float* __restrict__ out_others,
-	 float* __restrict__ max_blending)
+	 float* __restrict__ max_blending,
+	 const float* __restrict__ texture,
+	 const int texture_res)
  {
 	 // Identify current tile and associated min/max pixel range.
 	 auto block = cg::this_thread_block();
@@ -647,6 +650,16 @@
 			 int vertex_idx1 = triangles_indices[aux + 1];
 			 int vertex_idx2 = triangles_indices[aux + 2];
 
+			 // Textured triangles (step 4): RGB residual from this triangle's own texture,
+			 // added to the interpolated vertex colour. texture == nullptr -> plain TS+.
+			 // UV from the screen-space barycentrics for now (perspective-correct: step 6).
+			 float tex_rgb[CHANNELS];
+			 if (texture != nullptr) {
+				 const float2 tuv = triangle_uv(b0, b1);
+				 sample_texture_bilinear(tex_rgb, tuv.x, tuv.y,
+					 texture + (size_t)j_id * CHANNELS * texture_res * texture_res, texture_res, CHANNELS);
+			 }
+
 			 // now blend them
 			 for (int ch = 0; ch < CHANNELS; ++ch) {
 				// Access colors per vertex (not per triangle)
@@ -659,6 +672,8 @@
 				float wC = b1;    // vertex2
 
 				float interp = wA * c0 + wB * c1 + wC * c2;
+				if (texture != nullptr)
+					interp += tex_rgb[ch];
 				C[ch] += interp * alpha * T;
 			 } 
  
@@ -709,7 +724,9 @@
 	 const float* bg_color,
 	 float* out_color,
 	 float* out_others,
-	float* max_blending)
+	float* max_blending,
+	 const float* texture,
+	 const int texture_res)
  {
 	 renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		 ranges,
@@ -730,7 +747,9 @@
 		 bg_color,
 		 out_color,
 		 out_others,
-		 max_blending
+		 max_blending,
+		 texture,
+		 texture_res
 		 );
  }
 

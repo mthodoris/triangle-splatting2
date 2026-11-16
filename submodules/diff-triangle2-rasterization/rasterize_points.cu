@@ -64,6 +64,7 @@ RasterizetrianglesCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
+	const torch::Tensor& texture,
 	const bool debug)
 {
     
@@ -95,6 +96,22 @@ RasterizetrianglesCUDA(
 
   const int total_nb_points = P * 3; // FOR EACH TRIANGLE, WE CAN HAVE 3 NORMALS, OFFSETS,...
   
+  // Textured triangles: texture [P, NUM_CHANNELS, S, S] float32 on the GPU, or empty = no texture
+  // (exactly plain TS+).
+  const float* texture_ptr = nullptr;
+  int texture_res = 0;
+  torch::Tensor texture_c;
+  if (texture.numel() != 0)
+  {
+	TORCH_CHECK(texture.dim() == 4 && texture.size(0) == P && texture.size(1) == NUM_CHANNELS
+	            && texture.size(2) == texture.size(3) && texture.size(2) >= 2,
+	            "texture must have shape [num_triangles, ", NUM_CHANNELS, ", S, S] with S >= 2, got ", texture.sizes());
+	TORCH_CHECK(texture.scalar_type() == torch::kFloat32 && texture.is_cuda(), "texture must be a float32 CUDA tensor");
+	texture_c = texture.contiguous();
+	texture_ptr = texture_c.data_ptr<float>();
+	texture_res = texture.size(2);
+  }
+
   int rendered = 0;
   if(P != 0)
   {
@@ -128,6 +145,8 @@ RasterizetrianglesCUDA(
 		out_color.contiguous().data_ptr<float>(),
 		out_others.contiguous().data_ptr<float>(),
 		max_blending.contiguous().data_ptr<float>(),
+		texture_ptr,
+		texture_res,
 		radii.contiguous().data_ptr<int>(),
 		debug);
   }

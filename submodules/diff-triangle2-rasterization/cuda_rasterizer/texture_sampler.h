@@ -100,4 +100,22 @@ __forceinline__ __device__ float2 backward_sample_texture_bilinear(
     return make_float2(dtx * lim * k.gx, dty * lim * k.gy);
 }
 
+// Texture coordinate of a point inside a triangle (notes/plan.md, "UV = (b0, b1)").
+// b0, b1 are the TS+ barycentric weights of vertices v1 and v2, so the triangle maps to the
+// lower-left half of the texture square: v0 -> (0,0), v1 -> (1,0), v2 -> (0,1).
+// A pixel that TS+ counts as inside can have slightly negative weights (numerics), so the
+// point is clamped onto the triangle: each weight to >= 0, and if u + v > 1 it is scaled back
+// onto the edge v1-v2. Used identically in forward and backward.
+__forceinline__ __device__ float2 triangle_uv(float b0, float b1)
+{
+    float u = fmaxf(b0, 0.f);
+    float v = fmaxf(b1, 0.f);
+    const float s = u + v;
+    if (s > 1.f) {
+        u /= s;
+        v /= s;
+    }
+    return make_float2(u, v);
+}
+
 #endif
