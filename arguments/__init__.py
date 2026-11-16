@@ -79,6 +79,9 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.depth_ratio = 1.0
         self.debug = False
+        # Race-free vertex gradients in the rasterizer backward (atomicAdd instead of TS+'s racy '+=';
+        # notes/decisions.md 2026-11-16). Off = original TS+ behaviour.
+        self.atomic_vertex_grads = False
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):

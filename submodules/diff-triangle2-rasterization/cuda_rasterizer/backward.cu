@@ -280,7 +280,8 @@
 	 float* dL_dopacity,
 	 float* dL_dnormal3D,
 	 float* dL_dcolor,
-	 float* dL_dsh)
+	 float* dL_dsh,
+	 const bool atomic_vertex_grads)
  {
 	 auto idx = cg::this_grid().thread_rank();
 
@@ -387,9 +388,21 @@
 		float mul1 = (proj[0] * vertices[3 * vertex_index] + proj[4] * vertices[3 * vertex_index + 1] + proj[8] * vertices[3 * vertex_index + 2] + proj[12]) * p_w[cumsum_for_triangle + i] * p_w[cumsum_for_triangle + i];
 		float mul2 = (proj[1] * vertices[3 * vertex_index] + proj[5] * vertices[3 * vertex_index + 1] + proj[9] * vertices[3 * vertex_index + 2] + proj[13]) * p_w[cumsum_for_triangle + i] * p_w[cumsum_for_triangle + i];
 				
-		dL_dvertices3D[vertex_index].x += (proj[0] * p_w[cumsum_for_triangle + i] - proj[3] * mul1) * loss_points_x[i]  + (proj[1] * p_w[cumsum_for_triangle + i] - proj[3] * mul2) * loss_points_y[i] + transposed_dL_ddepth.x / 3;
-		dL_dvertices3D[vertex_index].y += (proj[4] * p_w[cumsum_for_triangle + i] - proj[7] * mul1) * loss_points_x[i] + (proj[5] * p_w[cumsum_for_triangle + i] - proj[7] * mul2) * loss_points_y[i] + transposed_dL_ddepth.y / 3;
-		dL_dvertices3D[vertex_index].z += (proj[8] * p_w[cumsum_for_triangle + i] - proj[11] * mul1) * loss_points_x[i] + (proj[9] * p_w[cumsum_for_triangle + i] - proj[11] * mul2) * loss_points_y[i] + transposed_dL_ddepth.z / 3;
+		const float g_x = (proj[0] * p_w[cumsum_for_triangle + i] - proj[3] * mul1) * loss_points_x[i]  + (proj[1] * p_w[cumsum_for_triangle + i] - proj[3] * mul2) * loss_points_y[i] + transposed_dL_ddepth.x / 3;
+		const float g_y = (proj[4] * p_w[cumsum_for_triangle + i] - proj[7] * mul1) * loss_points_x[i] + (proj[5] * p_w[cumsum_for_triangle + i] - proj[7] * mul2) * loss_points_y[i] + transposed_dL_ddepth.y / 3;
+		const float g_z = (proj[8] * p_w[cumsum_for_triangle + i] - proj[11] * mul1) * loss_points_x[i] + (proj[9] * p_w[cumsum_for_triangle + i] - proj[11] * mul2) * loss_points_y[i] + transposed_dL_ddepth.z / 3;
+		if (atomic_vertex_grads) {
+			// Textured-triangles fix (notes/decisions.md, 2026-11-16): triangles that share a vertex run in
+			// parallel, so the plain '+=' below is a data race and loses some contributions at random.
+			atomicAdd(&dL_dvertices3D[vertex_index].x, g_x);
+			atomicAdd(&dL_dvertices3D[vertex_index].y, g_y);
+			atomicAdd(&dL_dvertices3D[vertex_index].z, g_z);
+		} else {
+			// original TS+ behaviour (racy)
+			dL_dvertices3D[vertex_index].x += g_x;
+			dL_dvertices3D[vertex_index].y += g_y;
+			dL_dvertices3D[vertex_index].z += g_z;
+		}
 		
 	 }
  
@@ -963,7 +976,8 @@
 	 float* dL_dopacity,
 	 float* dL_dnormal3D,
 	 float* dL_dcolor,
-	 float* dL_dsh
+	 float* dL_dsh,
+	 const bool atomic_vertex_grads
 	 )
  {
 	 
@@ -994,7 +1008,8 @@
 		 dL_dopacity,
 		 dL_dnormal3D,
 		 dL_dcolor,
-		 dL_dsh
+		 dL_dsh,
+		 atomic_vertex_grads
 		 );
  }
 

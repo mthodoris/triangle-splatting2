@@ -175,6 +175,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
+	const bool atomic_vertex_grads,
 	const bool debug) 
 {
   const int P = triangles_indices.size(0); // number of triangles
@@ -237,6 +238,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 	  dL_dcolors.contiguous().data_ptr<float>(),
 	  dL_dsh.contiguous().data_ptr<float>(),
 	  dL_dpoints2D.contiguous().data_ptr<float>(),
+	  atomic_vertex_grads,
 	  debug);
   }
 

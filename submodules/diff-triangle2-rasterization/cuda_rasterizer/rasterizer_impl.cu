@@ -423,6 +423,7 @@
 	 float* dL_dcolor,
 	 float* dL_dsh,
 	 float* dL_dpoints2D,
+	 const bool atomic_vertex_grads,
 	 bool debug)
  {
 	 GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, total_nb_points, V);
@@ -522,6 +523,7 @@
 		 dL_dopacity,
 		 dL_dnormal3D,
 		 dL_dcolor,
-		 dL_dsh
+		 dL_dsh,
+		 atomic_vertex_grads
 		), debug)
  }

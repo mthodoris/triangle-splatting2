@@ -145,6 +145,7 @@ class _RasterizeTriangles(torch.autograd.Function):
                 num_rendered,
                 binningBuffer,
                 imgBuffer,
+                raster_settings.atomic_vertex_grads,
                 raster_settings.debug)
 
         # Compute gradients for relevant tensors by invoking backward method
@@ -187,6 +188,9 @@ class TriangleRasterizationSettings(NamedTuple):
     campos : torch.Tensor
     prefiltered : bool
     debug : bool
+    # Textured-triangles fix: the original TS+ backward adds vertex gradients with a racy '+='
+    # (notes/decisions.md, 2026-11-16). True = atomicAdd (reproducible). False = original TS+.
+    atomic_vertex_grads : bool = False
 
 class TriangleRasterizer(nn.Module):
     def __init__(self, raster_settings):

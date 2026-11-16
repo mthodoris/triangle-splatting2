@@ -100,7 +100,8 @@
 		 float* dL_dopacity,
 		 float* dL_dnormal3D,
 		 float* dL_dcolor,
-		 float* dL_dsh
+		 float* dL_dsh,
+		 const bool atomic_vertex_grads   // true: atomicAdd (fix), false: original racy '+='
 		 );
  }
  

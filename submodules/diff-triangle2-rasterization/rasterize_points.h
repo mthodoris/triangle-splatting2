@@ -70,6 +70,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
+	const bool atomic_vertex_grads,
 	const bool debug);
 		
 torch::Tensor markVisible(
