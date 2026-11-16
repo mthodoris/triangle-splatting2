@@ -78,6 +78,8 @@ class TriangleModel:
         self.texture_res = int(texture_res)
         self._texture = torch.empty(0)
         self.split_texture = "zero"
+        # step 6: texture UV mode (True = perspective-correct, False = screen space as in steps 4-5)
+        self.perspective_uv = True
 
         self.size_probs_zero = 0.0
         self.size_probs_zero_image_space = 0.0
@@ -117,6 +119,7 @@ class TriangleModel:
         if self.texture_res > 0:
             point_cloud_state_dict["texture"] = self._texture
             point_cloud_state_dict["texture_res"] = self.texture_res
+            point_cloud_state_dict["perspective_uv"] = self.perspective_uv
 
         torch.save(point_cloud_state_dict, os.path.join(path, 'point_cloud_state_dict.pt'))
 
@@ -138,6 +141,8 @@ class TriangleModel:
         if "texture" in state:   # textured model (older/plain TS+ checkpoints have no texture)
             self._texture = state["texture"].to(device).to(torch.float32).detach().clone().requires_grad_(True)
             self.texture_res = int(state["texture_res"])
+            # checkpoints from before step 6 have no key and were trained with screen-space UVs
+            self.perspective_uv = bool(state.get("perspective_uv", False))
         else:
             self._texture = torch.empty(0)
             self.texture_res = 0

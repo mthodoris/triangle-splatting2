@@ -85,6 +85,7 @@ class _RasterizeTriangles(torch.autograd.Function):
             raster_settings.campos,
             raster_settings.prefiltered,
             texture,
+            raster_settings.perspective_uv,
             raster_settings.debug
         )
 
@@ -140,6 +141,7 @@ class _RasterizeTriangles(torch.autograd.Function):
                 binningBuffer,
                 imgBuffer,
                 ctx.texture,
+                raster_settings.perspective_uv,
                 raster_settings.atomic_vertex_grads,
                 raster_settings.debug)
 
@@ -186,6 +188,10 @@ class TriangleRasterizationSettings(NamedTuple):
     # Textured-triangles fix: the original TS+ backward adds vertex gradients with a racy '+='
     # (notes/decisions.md, 2026-11-16). True = atomicAdd (reproducible). False = original TS+.
     atomic_vertex_grads : bool = False
+    # Textured triangles, step 6: texture UV from perspective-correct barycentrics (True, what a GPU /
+    # Unity does) or from TS+'s screen-space ones (False, the step 4-5 behaviour, for the ablation).
+    # No effect without a texture.
+    perspective_uv : bool = True
 
 class TriangleRasterizer(nn.Module):
     def __init__(self, raster_settings):

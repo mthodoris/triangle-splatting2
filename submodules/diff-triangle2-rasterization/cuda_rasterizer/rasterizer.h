@@ -64,6 +64,7 @@ namespace CudaRasterizer
 			float* max_blending,
 			const float* texture,      // [P, NUM_CHANNELS, S, S] or nullptr (no texture)
 			const int texture_res,     // S
+			const bool perspective_uv, // texture UV: true = perspective-correct, false = screen space
 			int* radii = nullptr,
 			bool debug = false);
 
@@ -101,6 +102,7 @@ namespace CudaRasterizer
 			const float* texture,      // [P, NUM_CHANNELS, S, S] or nullptr (no texture)
 			const int texture_res,     // S
 			float* dL_dtexture,        // [P, NUM_CHANNELS, S, S]
+			const bool perspective_uv, // must be the same as in forward
 			const bool atomic_vertex_grads,   // true: race-free vertex gradients (see backward.cu)
 			bool debug);
 	};

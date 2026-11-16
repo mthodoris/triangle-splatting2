@@ -478,7 +478,8 @@
 	 float* __restrict__ out_others,
 	 float* __restrict__ max_blending,
 	 const float* __restrict__ texture,
-	 const int texture_res)
+	 const int texture_res,
+	 const float* __restrict__ p_w)            // [3P] 1/depth per triangle corner, or nullptr = screen-space UV
  {
 	 // Identify current tile and associated min/max pixel range.
 	 auto block = cg::this_thread_block();
@@ -512,6 +513,7 @@
 	 __shared__ float2 collected_xy[BLOCK_SIZE];
 	 __shared__ float2 collected_phi_center[BLOCK_SIZE];
 	 __shared__ float2 collected_p_images[BLOCK_SIZE * MAX_NB_POINTS];
+	 __shared__ float collected_p_w[BLOCK_SIZE * MAX_NB_POINTS];   // textured triangles, step 6
 	 /*
 	 ===================================================================================================
 	 */
@@ -555,6 +557,9 @@
 				collected_offsets[MAX_NB_POINTS * block.thread_rank() + k] = offsets[3 * coll_id + k];;
 				collected_p_images[MAX_NB_POINTS * block.thread_rank() + k] = p_image[3 * coll_id + k];
 			}
+			if (p_w != nullptr)
+				for (int k = 0; k < 3; k++)
+					collected_p_w[MAX_NB_POINTS * block.thread_rank() + k] = p_w[3 * coll_id + k];
 			collected_phi_center[block.thread_rank()] = phi_center[coll_id];
 		 }
 		 block.sync();
@@ -652,10 +657,13 @@
 
 			 // Textured triangles (step 4): RGB residual from this triangle's own texture,
 			 // added to the interpolated vertex colour. texture == nullptr -> plain TS+.
-			 // UV from the screen-space barycentrics for now (perspective-correct: step 6).
+			 // UV: perspective-correct barycentrics (step 6), or screen-space ones if p_w == nullptr.
 			 float tex_rgb[CHANNELS];
 			 if (texture != nullptr) {
-				 const float2 tuv = triangle_uv(b0, b1);
+				 const float2 bb = (p_w != nullptr)
+					 ? perspective_correct_uv(b0, b1, b2, collected_p_w[j * 3 + 0], collected_p_w[j * 3 + 1], collected_p_w[j * 3 + 2])
+					 : make_float2(b0, b1);
+				 const float2 tuv = triangle_uv(bb.x, bb.y);
 				 sample_texture_bilinear(tex_rgb, tuv.x, tuv.y,
 					 texture + (size_t)j_id * CHANNELS * texture_res * texture_res, texture_res, CHANNELS);
 			 }
@@ -726,7 +734,8 @@
 	 float* out_others,
 	float* max_blending,
 	 const float* texture,
-	 const int texture_res)
+	 const int texture_res,
+	 const float* p_w)
  {
 	 renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		 ranges,
@@ -749,7 +758,8 @@
 		 out_others,
 		 max_blending,
 		 texture,
-		 texture_res
+		 texture_res,
+		 p_w
 		 );
  }
 

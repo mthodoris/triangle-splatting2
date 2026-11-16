@@ -60,7 +60,8 @@
 		 float* dL_dpoints2D,
 		 const float* texture,      // [P, NUM_CHANNELS, S, S] or nullptr (no texture)
 		 const int texture_res,     // S
-		 float* dL_dtexture);       // [P, NUM_CHANNELS, S, S]
+		 float* dL_dtexture,        // [P, NUM_CHANNELS, S, S]
+		 const float* p_w);         // [3P] 1/depth of each corner, or nullptr = screen-space UV
 
 	 void computeVertexColorGradients(
         int V, int D, int M,

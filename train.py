@@ -54,6 +54,7 @@ def training(
 
     # Load parameters, triangles and scene
     triangles = TriangleModel(dataset.sh_degree, dataset.texture_res)
+    triangles.perspective_uv = not dataset.screen_space_uv
     scene = Scene(dataset, triangles, opt.set_weight, opt.set_sigma)
     triangles.training_setup(opt, opt.feature_lr, opt.weight_lr, opt.lr_triangles_points_init)
     triangles.add_percentage = opt.add_percentage

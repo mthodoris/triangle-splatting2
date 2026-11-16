@@ -579,7 +579,8 @@
 	 float* __restrict__ dL_dpoints2D,
 	 const float* __restrict__ texture,       // [P, C, S, S] or nullptr (no texture)
 	 const int texture_res,                   // S
-	 float* __restrict__ dL_dtexture)         // [P, C, S, S] (unused if texture == nullptr)
+	 float* __restrict__ dL_dtexture,         // [P, C, S, S] (unused if texture == nullptr)
+	 const float* __restrict__ p_w)           // [3P] 1/depth per corner, or nullptr = screen-space UV
  {
 	 // We rasterize again. Compute necessary block info.
 	 auto block = cg::this_thread_block();
@@ -612,6 +613,7 @@
 	 __shared__ float collected_depths[BLOCK_SIZE];
 	 __shared__ float2 collected_xy[BLOCK_SIZE];
 	 __shared__ float2 collected_phi_center[BLOCK_SIZE];
+	 __shared__ float collected_p_w[BLOCK_SIZE * MAX_NB_POINTS];   // textured triangles, step 6
 	 /*
 	 ===================================================================================================
 	 */
@@ -687,6 +689,9 @@
 				collected_p_images[MAX_NB_POINTS * block.thread_rank() + k] = p_image[3 * coll_id + k];
 			}
 			collected_phi_center[block.thread_rank()] = phi_center[coll_id];
+			if (p_w != nullptr)
+				for (int k = 0; k < 3; k++)
+					collected_p_w[MAX_NB_POINTS * block.thread_rank() + k] = p_w[3 * coll_id + k];
 		 }
 		 block.sync();
  
@@ -789,7 +794,11 @@
 			 // last_color / accum_rec) below. Then scatter dL/dsample = alpha * T * dL_dpixel into the
 			 // 4 texels of the bilinear cell. dL/d(u,v) is not propagated to the vertices (decision 2).
 			 if (texture != nullptr) {
-				 const float2 tuv = triangle_uv(b0, b1);
+				 // same UV as the forward (perspective-correct if p_w != nullptr, step 6)
+				 const float2 bb = (p_w != nullptr)
+					 ? perspective_correct_uv(b0, b1, b2, collected_p_w[j * 3 + 0], collected_p_w[j * 3 + 1], collected_p_w[j * 3 + 2])
+					 : make_float2(b0, b1);
+				 const float2 tuv = triangle_uv(bb.x, bb.y);
 				 const size_t toff = (size_t)j_id * C * texture_res * texture_res;
 				 float tex_rgb[C];
 				 sample_texture_bilinear(tex_rgb, tuv.x, tuv.y, texture + toff, texture_res, C);
@@ -1084,7 +1093,8 @@
 	 float* dL_dpoints2D,
 	 const float* texture,
 	 const int texture_res,
-	 float* dL_dtexture
+	 float* dL_dtexture,
+	 const float* p_w
 	)
  {
 	 renderCUDA<NUM_CHANNELS> << <grid, block >> >(
@@ -1115,6 +1125,7 @@
 		 dL_dpoints2D,
 		 texture,
 		 texture_res,
-		 dL_dtexture
+		 dL_dtexture,
+		 p_w
 		 );
  }

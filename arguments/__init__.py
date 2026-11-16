@@ -66,6 +66,9 @@ class ModelParams(ParamGroup):
         # textured triangles: per-triangle RGB residual texture of size texture_res x texture_res
         # (0 = no texture at all, i.e. exactly plain TS+). See notes/plan.md.
         self.texture_res = 8
+        # step 6: texture UV from TS+'s screen-space barycentrics instead of perspective-correct ones
+        # (only for the ablation; stored in the checkpoint, so render.py uses the same mode)
+        self.screen_space_uv = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

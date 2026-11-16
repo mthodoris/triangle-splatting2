@@ -37,13 +37,14 @@ def check(name, ok, detail=""):
     print(f"  [{'OK' if ok else 'FAIL'}] {name} {detail}")
 
 
-def render(pkg, m, cam, scaling, texture=None, colors_precomp=None, grad=False):
+def render(pkg, m, cam, scaling, texture=None, colors_precomp=None, grad=False, perspective_uv=None):
     settings = pkg.TriangleRasterizationSettings(
         image_height=cam["H"] * scaling, image_width=cam["W"] * scaling,
         tanfovx=cam["tanfovx"], tanfovy=cam["tanfovy"],
         bg=torch.zeros(3, device=dev), scale_modifier=1.0,
         viewmatrix=cam["viewmatrix"], projmatrix=cam["projmatrix"],
-        sh_degree=m["sh_degree"], campos=cam["campos"], prefiltered=False, debug=False)
+        sh_degree=m["sh_degree"], campos=cam["campos"], prefiltered=False, debug=False,
+        **({} if perspective_uv is None else dict(perspective_uv=perspective_uv)))
     rast = pkg.TriangleRasterizer(raster_settings=settings)
     kw = dict(vertices=m["vertices"].detach().clone().requires_grad_(grad),
               triangles_indices=m["triangles_indices"], vertex_weights=m["vertex_weights"],
@@ -128,7 +129,9 @@ def main():
             vert_col = base_col.clone().view(T, 3, 3)
             vert_col[:, 1] += corner[:, 0]
             vert_col[:, 2] += corner[:, 1]
-            a = render(ours, mu, cam, args.scaling, colors_precomp=base_col, texture=tex)
+            # (screen-space UVs: the vertex colours are blended with TS+'s screen-space weights;
+            #  perspective-correct UVs are tested in test_texture_perspective.py)
+            a = render(ours, mu, cam, args.scaling, colors_precomp=base_col, texture=tex, perspective_uv=False)
             b = render(ours, mu, cam, args.scaling, colors_precomp=vert_col.view(-1, 3).contiguous())
             d = (a["image"] - b["image"]).abs()
             err, err99 = d.max().item(), d.flatten().quantile(0.99).item() if d.numel() < 2**24 else float("nan")

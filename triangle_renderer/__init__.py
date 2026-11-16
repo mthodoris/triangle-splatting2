@@ -67,6 +67,7 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         prefiltered=False,
         debug=pipe.debug,
         atomic_vertex_grads=getattr(pipe, "atomic_vertex_grads", False),
+        perspective_uv=getattr(pc, "perspective_uv", True),
     )
 
     rasterizer = TriangleRasterizer(raster_settings=raster_settings)

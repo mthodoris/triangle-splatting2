@@ -118,4 +118,21 @@ __forceinline__ __device__ float2 triangle_uv(float b0, float b1)
     return make_float2(u, v);
 }
 
+// Perspective-correct barycentrics (step 6). TS+ computes the weights b on the 2D image; on a
+// slanted triangle these are not the 3D weights, so a texture would be stretched toward the far end
+// and "swim" when the camera moves. With w_i = 1 / depth of vertex i (TS+'s p_w):
+//     b_i' = b_i * w_i / sum_j b_j * w_j
+// Same vertex order as TS+: b2 <-> v0, b0 <-> v1, b1 <-> v2. Returns (b0', b1') = the UV before
+// triangle_uv(). Only used for the texture UV; the vertex-colour blend keeps the original b, so a
+// zero texture is still exactly plain TS+.
+__forceinline__ __device__ float2 perspective_correct_uv(float b0, float b1, float b2,
+                                                         float w0, float w1, float w2)
+{
+    const float a0 = b2 * w0, a1 = b0 * w1, a2 = b1 * w2;
+    const float s = a0 + a1 + a2;
+    if (!(s > 0.f))                 // degenerate (cannot happen for visible triangles); keep screen space
+        return make_float2(b0, b1);
+    return make_float2(a1 / s, a2 / s);
+}
+
 #endif

@@ -65,6 +65,7 @@ RasterizetrianglesCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const torch::Tensor& texture,
+	const bool perspective_uv,
 	const bool debug)
 {
     
@@ -147,6 +148,7 @@ RasterizetrianglesCUDA(
 		max_blending.contiguous().data_ptr<float>(),
 		texture_ptr,
 		texture_res,
+		perspective_uv,
 		radii.contiguous().data_ptr<int>(),
 		debug);
   }
@@ -176,6 +178,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const torch::Tensor& texture,
+	const bool perspective_uv,
 	const bool atomic_vertex_grads,
 	const bool debug) 
 {
@@ -259,6 +262,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  texture_ptr,
 	  texture_res,
 	  texture_ptr != nullptr ? dL_dtexture.data_ptr<float>() : nullptr,
+	  perspective_uv,
 	  atomic_vertex_grads,
 	  debug);
   }

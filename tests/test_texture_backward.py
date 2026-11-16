@@ -46,7 +46,7 @@ def check(name, ok, detail=""):
     print(f"  [{'OK' if ok else 'FAIL'}] {name} {detail}")
 
 
-def run(m, cam, scaling, texture=None, colors_precomp=None, loss_seed=0):
+def run(m, cam, scaling, texture=None, colors_precomp=None, loss_seed=0, perspective_uv=True):
     """Render, apply a fixed pseudo-random loss (image + aux terms, as compare_rasterizers.py), backward.
     Returns the loss (float64) and the gradients of all leaves."""
     settings = ours.TriangleRasterizationSettings(
@@ -55,7 +55,7 @@ def run(m, cam, scaling, texture=None, colors_precomp=None, loss_seed=0):
         bg=torch.zeros(3, device=dev), scale_modifier=1.0,
         viewmatrix=cam["viewmatrix"], projmatrix=cam["projmatrix"],
         sh_degree=m.get("sh_degree", 0), campos=cam["campos"], prefiltered=False, debug=False,
-        atomic_vertex_grads=True)
+        atomic_vertex_grads=True, perspective_uv=perspective_uv)
     rast = ours.TriangleRasterizer(raster_settings=settings)
     leaf = lambda t: t.detach().clone().requires_grad_(True)  # noqa: E731
     lv = dict(vertices=leaf(m["vertices"]), vertex_weights=leaf(m["vertex_weights"]))
@@ -186,7 +186,8 @@ def main():
     vert_col = base_col.clone().view(T, 3, 3)
     vert_col[:, 1] += corner[:, 0]
     vert_col[:, 2] += corner[:, 1]
-    _, ga = run(mu, cam, args.scaling, texture=tex, colors_precomp=base_col)
+    # (screen-space UVs here: the vertex colours are blended with TS+'s screen-space weights)
+    _, ga = run(mu, cam, args.scaling, texture=tex, colors_precomp=base_col, perspective_uv=False)
     _, gb = run(mu, cam, args.scaling, colors_precomp=vert_col.view(-1, 3).contiguous())
     _, g0 = run(mu, cam, args.scaling, colors_precomp=base_col)                  # texture ignored
     for k in ("vertices", "vertex_weights", "colors"):

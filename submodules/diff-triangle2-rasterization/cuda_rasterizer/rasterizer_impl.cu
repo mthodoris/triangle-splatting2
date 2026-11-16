@@ -238,6 +238,7 @@
 	 float* max_blending,
 	 const float* texture,
 	 const int texture_res,
+	 const bool perspective_uv,
 	 int* radii,
 	 bool debug)
  {
@@ -385,7 +386,8 @@
 		 out_others,
 		 max_blending,
 		 texture,
-		 texture_res), debug)
+		 texture_res,
+		 (texture != nullptr && perspective_uv) ? geomState.p_w : nullptr), debug)
  
 	 return num_rendered;
  }
@@ -426,6 +428,7 @@
 	 const float* texture,
 	 const int texture_res,
 	 float* dL_dtexture,
+	 const bool perspective_uv,
 	 const bool atomic_vertex_grads,
 	 bool debug)
  {
@@ -478,7 +481,8 @@
 		 dL_dpoints2D,
 		 texture,
 		 texture_res,
-		 dL_dtexture), debug)
+		 dL_dtexture,
+		 (texture != nullptr && perspective_uv) ? geomState.p_w : nullptr), debug)
  
 
 	if (colors_precomp == nullptr) {
