@@ -53,7 +53,9 @@ def training(
     tb_writer = prepare_output_and_logger(dataset)
 
     # Load parameters, triangles and scene
-    triangles = TriangleModel(dataset.sh_degree, dataset.texture_res)
+    # late texture start: the model is plain TS+ (texture_res 0) until opt.texture_from_iter
+    late_texture = dataset.texture_res > 0 and opt.texture_from_iter > 0
+    triangles = TriangleModel(dataset.sh_degree, 0 if late_texture else dataset.texture_res)
     triangles.perspective_uv = not dataset.screen_space_uv
     scene = Scene(dataset, triangles, opt.set_weight, opt.set_sigma)
     triangles.training_setup(opt, opt.feature_lr, opt.weight_lr, opt.lr_triangles_points_init)
@@ -105,6 +107,11 @@ def training(
 
 
         iter_start.record()
+
+        if late_texture and triangles.texture_res == 0 and iteration >= opt.texture_from_iter:
+            triangles.start_texture(dataset.texture_res, opt.texture_lr)
+            print(f"\n[ITER {iteration}] textures started: {triangles._triangle_indices.shape[0]} triangles, "
+                  f"S = {dataset.texture_res}, {triangles._texture.numel() * 4 / 2**20:.0f} MB")
 
         triangles.update_learning_rate(iteration)
         if iteration < sigma_start:

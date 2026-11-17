@@ -173,6 +173,48 @@ def main():
         s = torch.load(os.path.join(d, "point_cloud_state_dict.pt"))
         check("saved file has no texture (same keys as plain TS+)", "texture" not in s and "texture_res" not in s)
 
+    print("\nlate texture start (--texture_from_iter): plain TS+ first, then start_texture")
+    ml = make_model(0)
+    for r in range(2):   # some plain-TS+ training history first (Adam state on the other groups)
+        for p in [ml.vertices, ml.vertex_weight, ml._features_dc, ml._features_rest]:
+            p.grad = torch.randn_like(p)
+        ml.optimizer.step()
+        ml.optimizer.zero_grad(set_to_none=True)
+        ml.importance_score = torch.rand(ml._triangle_indices.shape[0], device=dev, generator=g) + 0.1
+        ml.image_size = torch.ones(ml._triangle_indices.shape[0], device=dev)
+        ml.add_new_gs(iteration=500, cap_max=10**7, splitt_large_triangles=5)
+        ml.prune_triangles(torch.rand(ml._triangle_indices.shape[0], device=dev, generator=g) > 0.2)
+    before = {n: (grp["params"][0].detach().clone(), ml.optimizer.state[grp["params"][0]]["exp_avg"].clone())
+              for n, grp in ((grp["name"], grp) for grp in ml.optimizer.param_groups)}
+    ml.start_texture(4, 0.0025)
+    T = ml._triangle_indices.shape[0]
+    check("start: one zero texture [3, 4, 4] per triangle", ml.has_texture and ml._texture.shape == (T, 3, 4, 4)
+          and torch.all(ml._texture == 0).item(), f"({T} triangles)")
+    grp = ml._texture_group()
+    check("start: texture group in the optimizer with texture_lr", grp is not None and grp["lr"] == 0.0025
+          and grp["params"][0] is ml._texture)
+    same = all(torch.equal(grp["params"][0].detach(), before[grp["name"]][0]) and
+               torch.equal(ml.optimizer.state[grp["params"][0]]["exp_avg"], before[grp["name"]][1])
+               for grp in ml.optimizer.param_groups if grp["name"] != "texture")
+    check("start: other parameters and their Adam state unchanged", same)
+    try:
+        ml.start_texture(4, 0.0025)
+        check("start twice -> error", False)
+    except AssertionError:
+        check("start twice -> error", True)
+    original = label(ml)   # one Adam step incl. the new texture group, then ID textures
+    for r in range(3):
+        ml.importance_score = torch.rand(ml._triangle_indices.shape[0], device=dev, generator=g) + 0.1
+        ml.image_size = torch.ones(ml._triangle_indices.shape[0], device=dev)
+        ml.add_new_gs(iteration=500, cap_max=10**7, splitt_large_triangles=5)
+        ml.prune_triangles(torch.rand(ml._triangle_indices.shape[0], device=dev, generator=g) > 0.2)
+        ml._prune_vertices(torch.rand(ml.vertices.shape[0], device=dev, generator=g) > 0.05)
+    verify(ml, original, "late start + 3 rounds", expect_children=True)
+    with tempfile.TemporaryDirectory() as d:
+        ml.save_parameters(d)
+        s = torch.load(os.path.join(d, "point_cloud_state_dict.pt"))
+        check("late start: saved file has the texture", "texture" in s and s["texture_res"] == 4)
+
     print("\nRESULT:", "PASS" if all(results) else "FAIL", f"({sum(results)}/{len(results)} checks)")
     sys.exit(0 if all(results) else 1)
 

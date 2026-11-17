@@ -109,6 +109,10 @@ class OptimizationParams(ParamGroup):
         # ("zero" = v1 rule; "copy"/"resample" are planned experiment options).
         self.texture_lr = 0.0025
         self.split_texture = "zero"
+        # iteration at which the textures are created (decisions.md 2026-11-17): before it the model is
+        # plain TS+, so the early growth peak (~6M triangles at it4000) carries no texture memory.
+        # 5000 = just after TS+'s first big prune (it4500). 0 = textures from the start.
+        self.texture_from_iter = 5000
 
         # Opacity & weight
         self.set_weight = 0.28

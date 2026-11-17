@@ -300,6 +300,22 @@ class TriangleModel:
             self._update_texture(lambda t: torch.cat([t, new_textures], dim=0),
                                  lambda s: torch.cat([s, torch.zeros_like(new_textures)], dim=0))
 
+    def start_texture(self, texture_res, texture_lr):
+        """Late texture start (--texture_from_iter, notes/plan.md 8.5): until now the model was plain
+        TS+ (texture_res 0). Give every current triangle a zero residual texture [3, S, S] and add it
+        to the optimizer with its own lr. Zero textures render exactly like no texture, so the image
+        does not change at the switch. From here on prune/split keep the textures in sync as usual."""
+        assert self.texture_res == 0, "textures already started"
+        assert self.optimizer is not None, "call training_setup first"
+        if self.split_texture != "zero":
+            raise NotImplementedError(f"--split_texture {self.split_texture}: only 'zero' is implemented so far")
+        S = int(texture_res)
+        self.texture_res = S
+        self._texture = nn.Parameter(torch.zeros((self._triangle_indices.shape[0], 3, S, S),
+                                                 dtype=torch.float, device="cuda").requires_grad_(True))
+        self.optimizer.add_param_group({'params': [self._texture], 'lr': texture_lr, "name": "texture"})
+        self._check_texture_sync()
+
     def _check_texture_sync(self):
         if self.texture_res > 0:
             assert self._texture.shape[0] == self._triangle_indices.shape[0], \
