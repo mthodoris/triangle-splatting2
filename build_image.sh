@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 REG=195.251.117.42:31000/textured-triangles
-BASE=${BASE:-$REG:3ef9c33}
+BASE=${BASE:-$REG:ab7bdf0}
 COMMIT=$(git rev-parse HEAD)
 SHORT=${COMMIT:0:7}
 # the image clones the code from GitHub, so the commit must be pushed there
