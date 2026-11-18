@@ -113,6 +113,15 @@ class OptimizationParams(ParamGroup):
         # plain TS+, so the early growth peak (~6M triangles at it4000) carries no texture memory.
         # 5000 = just after TS+'s first big prune (it4500). 0 = textures from the start.
         self.texture_from_iter = 5000
+        # end-phase tests (decisions.md 2026-11-18), both off by default:
+        # texture lr decays exponentially from texture_lr at texture_lr_decay_from to
+        # texture_lr * texture_lr_final_mult at the last iteration (0 = no decay).
+        self.texture_lr_decay_from = 0
+        self.texture_lr_final_mult = 0.1
+        # L2 shrink on the texture (decoupled weight decay, as in AdamW): after every Adam step
+        # texture *= 1 - lr_texture * texture_wd. Since Adam steps are at most ~lr, values settle
+        # below ~1 / texture_wd (wd 1 -> |t| <~ 1, the colour range). 0 = off.
+        self.texture_wd = 0.0
 
         # Opacity & weight
         self.set_weight = 0.28

@@ -114,6 +114,9 @@ def training(
                   f"S = {dataset.texture_res}, {triangles._texture.numel() * 4 / 2**20:.0f} MB")
 
         triangles.update_learning_rate(iteration)
+        if triangles.has_texture and opt.texture_lr_decay_from > 0 and iteration >= opt.texture_lr_decay_from:
+            t = (iteration - opt.texture_lr_decay_from) / max(opt.iterations - opt.texture_lr_decay_from, 1)
+            triangles._texture_group()["lr"] = opt.texture_lr * opt.texture_lr_final_mult ** min(t, 1.0)
         if iteration < sigma_start:
             current_sigma = initial_sigma
         else:
@@ -280,6 +283,8 @@ def training(
             if iteration < opt.iterations:
                 triangles.optimizer.step()
                 triangles.optimizer.zero_grad(set_to_none = True)
+                if triangles.has_texture and opt.texture_wd > 0:
+                    triangles._texture.mul_(1.0 - triangles._texture_group()["lr"] * opt.texture_wd)
 
 
     # cleaning of triangles that we do not need
