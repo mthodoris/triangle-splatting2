@@ -120,8 +120,8 @@ class OptimizationParams(ParamGroup):
         self.texture_lr_final_mult = 0.1
         # L2 shrink on the texture (decoupled weight decay, as in AdamW): after every Adam step
         # texture *= 1 - lr_texture * texture_wd. Since Adam steps are at most ~lr, values settle
-        # below ~1 / texture_wd (wd 1 -> |t| <~ 1, the colour range). 0 = off.
-        self.texture_wd = 0.0
+        # below ~1 / texture_wd (wd 1 -> |t| <~ 1, the colour range). 0 = off. Default 1.0 (best engine view, decisions.md 2026-11-19).
+        self.texture_wd = 1.0
 
         # Opacity & weight
         self.set_weight = 0.28
