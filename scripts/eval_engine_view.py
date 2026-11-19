@@ -79,6 +79,7 @@ def render(m, cam, W, H, visibility="zbuf", sh=False, budget=12_000_000, out=Non
         start = end
     if out is not None:
         out["depth"] = best.reshape(H, W) if visibility == "zbuf" else None
+        out["win"], out["wts"] = win, wts                       # winning triangle and its perspective-correct weights
     # colours
     if sh:
         dirs = (m["verts"] - t).float(); dirs = dirs / dirs.norm(dim=1, keepdim=True)
@@ -107,12 +108,15 @@ def main():
     p.add_argument("model"); p.add_argument("--images", required=True)
     p.add_argument("--visibility", default="zbuf", choices=["zbuf", "centre"])
     p.add_argument("--sh", action="store_true")
+    p.add_argument("--sh_degree", type=int, default=-1, help="with --sh: use only SH bands up to this degree (-1 = all)")
     p.add_argument("--save_dir"); p.add_argument("--views", default="")
     p.add_argument("--tag", default="")
     p.add_argument("--out_dir", default=os.path.join(os.path.dirname(__file__), "../../runs/engine_eval"))
     a = p.parse_args()
     dev = "cuda"
     m = load_model(a.model, dev)
+    if a.sh_degree >= 0:
+        m["deg"] = min(m["deg"], a.sh_degree)
     cams = sorted(json.load(open(os.path.join(a.model, "cameras.json"))), key=lambda c: c["img_name"])
     test = cams[::8]                                         # llffhold 8, as TS+ --eval
     if a.views:
@@ -130,7 +134,7 @@ def main():
             os.makedirs(a.save_dir, exist_ok=True)
             Image.fromarray((img.cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(os.path.join(a.save_dir, cam["img_name"] + ".png"))
     mean = {k: float(np.mean([r[k] for r in res])) for k in ("psnr", "ssim", "lpips")}
-    tag = a.tag or f"{a.visibility}{'_sh' if a.sh else ''}"
+    tag = a.tag or f"{a.visibility}{'_sh' if a.sh else ''}{a.sh_degree if a.sh and a.sh_degree >= 0 else ''}"
     os.makedirs(a.out_dir, exist_ok=True)
     run = os.path.basename(a.model.rstrip("/"))
     json.dump(dict(model=a.model, mean=mean, views=res), open(os.path.join(a.out_dir, f"{run}__{tag}.json"), "w"), indent=1)
